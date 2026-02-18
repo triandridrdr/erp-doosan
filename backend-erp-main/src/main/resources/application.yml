@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: erp-api-template
+
+  profiles:
+    default: local
+
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    time-zone: Asia/Seoul
+    default-property-inclusion: non_null
+
+  jpa:
+    open-in-view: false
+    database: mysql
+    database-platform: org.hibernate.dialect.MySQL8Dialect
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+
+# Swagger 설정 (공통)
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /api/docs
+    operations-sorter: method
+    tags-sorter: alpha
+  default-consumes-media-type: application/json
+  default-produces-media-type: application/json
+
+# 로깅 패턴 (공통)
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# JWT 설정
+jwt:
+  secret: ${JWT_SECRET:dGhpc2lzYXZlcnlzZWN1cmVzZWNyZXRrZXlmb3Jqd3R0b2tlbmdlbmVyYXRpb24xMjM0NTY3ODkw}
+  expiration: 3600000  # 1시간 (밀리초)
+

@@ -1,0 +1,77 @@
+spring:
+  cloud:
+    aws:
+      region:
+        static: ap-southeast-3
+
+  # NOTE: Sebelumnya local profile memakai AWS Parameter Store.
+  # Kalau baris ini aktif, aplikasi akan mencoba ambil config dari AWS saat startup.
+  # Untuk jalan full lokal, biarkan tetap remark.
+  # config:
+  #   import: "aws-parameterstore:/dev/erp_backend/"
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    #url: jdbc:mysql://127.0.0.1:3306/doosan
+    url: jdbc:mysql://localhost:3306/doosan
+    #username: ${DB_USERNAME}
+    #password: ${DB_PASSWORD}
+    username: root
+    password: ""
+    hikari:
+      maximum-pool-size: 2
+      minimum-idle: 1
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 600000
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        format_sql: true
+    show-sql: true
+
+# Actuator 설정
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+# Swagger 활성화
+springdoc:
+  swagger-ui:
+    enabled: true
+  api-docs:
+    enabled: true
+
+# 로깅 설정
+logging:
+  level:
+    root: INFO
+    com.doosan.erp: DEBUG
+    org.springframework.web: DEBUG
+    org.springframework.security: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+
+# AWS 설정
+aws:
+  credentials:
+    #access-key: ${AWS_ACCESS_KEY}
+    #secret-key: ${AWS_SECRET_KEY}
+    access-key: ${AWS_ACCESS_KEY:}
+    secret-key: ${AWS_SECRET_KEY:}
+  #region: ${AWS_REGION}
+  region: ${AWS_REGION:}
+  textract-region: ap-southeast-1
+
+# 파일 업로드 설정
+spring.servlet.multipart:
+  max-file-size: 10MB
+  max-request-size: 10MB

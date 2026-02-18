@@ -1,0 +1,74 @@
+pipeline {
+    agent any
+
+    environment {
+        //Jenkins variables
+        ACTIVE_PROFILE     = "dev"
+        PROJECT_NAME       = "erp_frontend"
+        BUILD_MODE         = "development"
+        ENV_FILE_PATH      = "./env_variables/.env.${BUILD_MODE}"
+        AWS_REGION         = "ap-southeast-3"
+        ECR_URL            = "286387522431.dkr.ecr.ap-southeast-3.amazonaws.com/${ACTIVE_PROFILE}_${PROJECT_NAME}"
+
+        //Remote Deployment settings
+        REMOTE_USER        = "doosan"
+        REMOTE_PATH        = "/home/${REMOTE_USER}/${PROJECT_NAME}"
+        REMOTE_INSTANCE_ID = "i-06e9a92a459ffa680"
+    }
+
+    stages {
+        stage("Docker Build") {
+            steps {
+                script {
+                    checkout scm
+
+                    echo "Building Docker Image..."
+                    sh "docker compose --env-file ${ENV_FILE_PATH} build"
+                }
+            }
+        }
+
+        stage("ECR Push") {
+            steps {
+                script {
+                    echo "Push Docker Image..."
+                    sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URL}"
+                    sh "docker push ${ECR_URL}"
+                }
+            }
+        }
+
+        stage("Deploy to Remote Server") {
+            steps {
+                script {
+                    echo "Deploying via AWS SSM..."
+
+                    def b64Env = sh(script: "base64 -w 0 ${ENV_FILE_PATH}", returnStdout: true).trim()
+                    def b64Content = sh(script: "base64 -w 0 docker-compose.yml", returnStdout: true).trim()
+
+                    def commands = [
+                        "set -ex",
+                        "mkdir -p ${REMOTE_PATH}",
+                        "echo '${b64Env}' | base64 -d > ${REMOTE_PATH}/.env",
+                        "echo '${b64Content}' | base64 -d > ${REMOTE_PATH}/docker-compose.yml",
+                        "cd ${REMOTE_PATH}",
+                        "aws ecr get-login-password --region ${env.AWS_REGION} | docker login --username AWS --password-stdin ${env.ECR_URL}",
+                        "docker compose pull",
+                        "docker compose up -d --force-recreate --remove-orphans",
+                        "docker image prune -f"
+                    ]
+
+                    def joinedCommands = commands.join(" && ")
+
+                    sh """
+                        aws ssm send-command \
+                            --document-name "AWS-RunShellScript" \
+                            --instance-ids "${REMOTE_INSTANCE_ID}" \
+                            --parameters '{"commands": ["${joinedCommands}"]}' \
+                            --region ${env.AWS_REGION}
+                    """
+                }
+            }
+        }
+    }
+}

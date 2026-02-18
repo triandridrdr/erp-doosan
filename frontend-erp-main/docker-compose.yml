@@ -1,0 +1,12 @@
+services:
+  erp-frontend:
+    image: ${ECR_URL}
+    container_name: erp-frontend
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_MODE: ${BUILD_MODE}
+    ports:
+      - "80:80"

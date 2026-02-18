@@ -1,0 +1,78 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.4.1'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.doosan'
+version = '0.0.1-SNAPSHOT'
+description = 'erp-api-template'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+configurations {
+    compileOnly {
+        extendsFrom annotationProcessor
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // ================= SPRING BOOT =================
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+
+    // ================= SWAGGER =================
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.0'
+
+    // ================= MAPSTRUCT =================
+    implementation 'org.mapstruct:mapstruct:1.5.5.Final'
+    annotationProcessor 'org.mapstruct:mapstruct-processor:1.5.5.Final'
+
+    // ================= LOMBOK =================
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+    testCompileOnly 'org.projectlombok:lombok'
+    testAnnotationProcessor 'org.projectlombok:lombok'
+
+    // ================= DATABASE =================
+    runtimeOnly 'com.mysql:mysql-connector-j'
+
+    // ================= JWT =================
+    implementation 'io.jsonwebtoken:jjwt-api:0.12.6'
+    runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.6'
+    runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.12.6'
+
+    // ================= AWS =================
+    implementation platform('software.amazon.awssdk:bom:2.29.46')
+    implementation 'software.amazon.awssdk:textract'
+    implementation 'software.amazon.awssdk:auth'
+    implementation 'io.awspring.cloud:spring-cloud-aws-starter-parameter-store:3.0.0'
+
+    // ================= TEST =================
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.security:spring-security-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += ['-parameters']
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}
+
+jar {
+    enabled = false
+}

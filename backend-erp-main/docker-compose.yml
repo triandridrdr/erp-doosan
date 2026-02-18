@@ -1,0 +1,33 @@
+services:
+  erp-backend:
+    image: ${ECR_URL:-286387522431.dkr.ecr.ap-southeast-3.amazonaws.com/dev_erp_backend}:latest
+    container_name: erp-backend
+    environment:
+      SPRING_PROFILES_ACTIVE: ${ACTIVE_PROFILE:-develop}
+      AWS_REGION: ${AWS_REGION:-ap-southeast-3}
+      TZ: Asia/Jakarta
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ACTIVE_PROFILE: ${ACTIVE_PROFILE:-develop}
+        FULL_TEST: ${FULL_TEST:-false} # If set to false, run only @Tag("smoke") tests to optimize build speed.
+    volumes:
+      - erp-data-volume:/app/data
+    ports:
+      - "80:8080"
+    networks:
+      - internal-net
+    restart: always
+
+networks:
+  internal-net:
+    driver: bridge
+
+volumes:
+  erp-data-volume:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/erp_backend
