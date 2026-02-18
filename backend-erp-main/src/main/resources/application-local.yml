@@ -4,6 +4,12 @@ spring:
       region:
         static: ap-southeast-3
 
+aws:
+  textract-region: ap-southeast-3
+  credentials:
+    access-key: ${AWS_ACCESS_KEY_ID:}
+    secret-key: ${AWS_SECRET_ACCESS_KEY:}
+
   # NOTE: Sebelumnya local profile memakai AWS Parameter Store.
   # Kalau baris ini aktif, aplikasi akan mencoba ambil config dari AWS saat startup.
   # Untuk jalan full lokal, biarkan tetap remark.
