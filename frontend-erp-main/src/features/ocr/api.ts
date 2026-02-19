@@ -40,3 +40,29 @@ export const ocrApi = {
     return response.data;
   },
 };
+
+export const ocrPythonApi = {
+  extract: async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await client.post<OcrResponse>('/api/v1/ocr/python/extract', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data;
+  },
+
+  analyze: async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await client.post<DocumentAnalysisResponse>('/api/v1/ocr/python/analyze', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data;
+  },
+};

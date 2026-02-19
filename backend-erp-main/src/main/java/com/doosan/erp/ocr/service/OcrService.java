@@ -3,12 +3,16 @@ package com.doosan.erp.ocr.service;
 import com.doosan.erp.common.constant.ErrorCode;
 import com.doosan.erp.common.exception.BusinessException;
 import com.doosan.erp.ocr.client.AwsTextractClient;
+import com.doosan.erp.ocr.client.PythonOcrClient;
+import com.doosan.erp.ocr.config.OcrProperties;
 import com.doosan.erp.ocr.dto.CellDto;
 import com.doosan.erp.ocr.dto.DocumentAnalysisResponse;
 import com.doosan.erp.ocr.dto.KeyValueDto;
 import com.doosan.erp.ocr.dto.OcrResponse;
 import com.doosan.erp.ocr.dto.TableDto;
 import com.doosan.erp.ocr.dto.TextBlockDto;
+import com.doosan.erp.ocr.dto.python.PythonOcrExtractResponse;
+import com.doosan.erp.ocr.dto.python.PythonOcrPageResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -51,6 +55,10 @@ public class OcrService {
     // AWS Textract API 호출을 위한 클라이언트
     private final AwsTextractClient awsTextractClient;
 
+    private final PythonOcrClient pythonOcrClient;
+
+    private final OcrProperties ocrProperties;
+
     // 지원하는 파일 형식 (MIME 타입)
     private static final Set<String> SUPPORTED_CONTENT_TYPES = Set.of(
             "image/png",
@@ -74,6 +82,16 @@ public class OcrService {
         validateFile(file);
 
         try {
+            if (ocrProperties.getEngine() == OcrProperties.Engine.python) {
+                PythonOcrExtractResponse response = pythonOcrClient.extract(
+                        ocrProperties.getPython().getBaseUrl(),
+                        file,
+                        ocrProperties.getPython().getEngine(),
+                        ocrProperties.getPython().isPreprocess()
+                );
+                return buildOcrResponseFromPython(response);
+            }
+
             byte[] fileBytes = file.getBytes();
             DetectDocumentTextResponse response = awsTextractClient.detectDocumentText(fileBytes);
             return buildOcrResponse(response);
@@ -84,7 +102,71 @@ public class OcrService {
         } catch (TextractException e) {
             log.error("Textract API 호출 실패: {}", e.getMessage());
             throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
+        } catch (Exception e) {
+            log.error("OCR 호출 실패: {}", e.getMessage());
+            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
         }
+    }
+
+    public OcrResponse extractTextWithPython(MultipartFile file) {
+        validateFile(file);
+
+        try {
+            PythonOcrExtractResponse response = pythonOcrClient.extract(
+                    ocrProperties.getPython().getBaseUrl(),
+                    file,
+                    ocrProperties.getPython().getEngine(),
+                    ocrProperties.getPython().isPreprocess()
+            );
+            return buildOcrResponseFromPython(response);
+        } catch (IOException e) {
+            log.error("파일 읽기 실패: {}", e.getMessage());
+            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
+        } catch (Exception e) {
+            log.error("OCR 호출 실패: {}", e.getMessage());
+            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
+        }
+    }
+
+    private OcrResponse buildOcrResponseFromPython(PythonOcrExtractResponse response) {
+        if (response == null) {
+            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED);
+        }
+
+        List<PythonOcrPageResult> pages = response.getPages() != null ? response.getPages() : List.of();
+
+        String extractedText = response.getText() != null ? response.getText().trim() : "";
+
+        List<TextBlockDto> blocks = pages.stream()
+                .flatMap(page -> {
+                    if (page.getLines() != null) {
+                        return page.getLines().stream().map(line -> TextBlockDto.builder()
+                                .text(line.getText())
+                                .confidence(line.getConfidence() != null ? line.getConfidence().floatValue() : 0.0f)
+                                .blockType("LINE")
+                                .build());
+                    }
+                    if (page.getWords() != null) {
+                        return page.getWords().stream().map(word -> TextBlockDto.builder()
+                                .text(word.getText())
+                                .confidence(word.getConfidence() != null ? word.getConfidence().floatValue() : 0.0f)
+                                .blockType("WORD")
+                                .build());
+                    }
+                    return List.<TextBlockDto>of().stream();
+                })
+                .toList();
+
+        float averageConfidence = (float) blocks.stream()
+                .mapToDouble(TextBlockDto::getConfidence)
+                .average()
+                .orElse(0.0);
+
+        return OcrResponse.builder()
+                .extractedText(extractedText)
+                .blocks(blocks)
+                .averageConfidence(averageConfidence)
+                .build();
     }
 
     /**
@@ -158,6 +240,16 @@ public class OcrService {
         validateFile(file);
 
         try {
+            if (ocrProperties.getEngine() == OcrProperties.Engine.python) {
+                PythonOcrExtractResponse response = pythonOcrClient.extract(
+                        ocrProperties.getPython().getBaseUrl(),
+                        file,
+                        ocrProperties.getPython().getEngine(),
+                        ocrProperties.getPython().isPreprocess()
+                );
+                return buildDocumentAnalysisResponseFromPython(response);
+            }
+
             byte[] fileBytes = file.getBytes();
             List<FeatureType> features = List.of(FeatureType.TABLES, FeatureType.FORMS);
             AnalyzeDocumentResponse response = awsTextractClient.analyzeDocument(fileBytes, features);
@@ -169,7 +261,67 @@ public class OcrService {
         } catch (TextractException e) {
             log.error("Textract API 호출 실패: {}", e.getMessage());
             throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
+        } catch (Exception e) {
+            log.error("OCR 호출 실패: {}", e.getMessage());
+            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
         }
+    }
+
+    public DocumentAnalysisResponse analyzeDocumentWithPython(MultipartFile file) {
+        validateFile(file);
+
+        try {
+            PythonOcrExtractResponse response = pythonOcrClient.extract(
+                    ocrProperties.getPython().getBaseUrl(),
+                    file,
+                    ocrProperties.getPython().getEngine(),
+                    ocrProperties.getPython().isPreprocess()
+            );
+            return buildDocumentAnalysisResponseFromPython(response);
+        } catch (IOException e) {
+            log.error("파일 읽기 실패: {}", e.getMessage());
+            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
+        } catch (Exception e) {
+            log.error("OCR 호출 실패: {}", e.getMessage());
+            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
+        }
+    }
+
+    private DocumentAnalysisResponse buildDocumentAnalysisResponseFromPython(PythonOcrExtractResponse response) {
+        if (response == null) {
+            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED);
+        }
+
+        List<PythonOcrPageResult> pages = response.getPages() != null ? response.getPages() : List.of();
+
+        List<TextBlockDto> lines = pages.stream()
+                .flatMap(page -> {
+                    if (page.getLines() != null) {
+                        return page.getLines().stream().map(line -> TextBlockDto.builder()
+                                .text(line.getText())
+                                .confidence(line.getConfidence() != null ? line.getConfidence().floatValue() : 0.0f)
+                                .blockType("LINE")
+                                .build());
+                    }
+                    return List.<TextBlockDto>of().stream();
+                })
+                .toList();
+
+        String extractedText = response.getText() != null ? response.getText().trim() : "";
+
+        float averageConfidence = (float) lines.stream()
+                .mapToDouble(TextBlockDto::getConfidence)
+                .average()
+                .orElse(0.0);
+
+        return DocumentAnalysisResponse.builder()
+                .extractedText(extractedText)
+                .lines(lines)
+                .tables(List.of())
+                .keyValuePairs(List.of())
+                .formFields(Map.of())
+                .averageConfidence(averageConfidence)
+                .build();
     }
 
     /**

@@ -12,6 +12,7 @@ import { LoginPage } from '../features/auth/LoginPage';
 import { SignupPage } from '../features/auth/SignupPage';
 import { StockListPage } from '../features/inventory/StockListPage';
 import { OcrPage } from '../features/ocr/OcrPage';
+import { OcrPythonPage } from '../features/ocr/OcrPythonPage';
 import { SalesOrderListPage } from '../features/sales/SalesOrderListPage';
 
 /**
@@ -148,6 +149,7 @@ const router = createBrowserRouter([
       { path: 'inventory', element: <StockListPage /> }, // 재고 관리
       { path: 'accounting', element: <JournalEntryListPage /> }, // 회계 관리
       { path: 'ocr', element: <OcrPage /> }, // OCR 기능
+      { path: 'ocr-python', element: <OcrPythonPage /> }, // OCR with Python
     ],
   },
   {

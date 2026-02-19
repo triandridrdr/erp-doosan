@@ -14,7 +14,16 @@ import type { DocumentAnalysisResponseData, TableDto } from './types';
 // OCR 모드 정의: 단순 추출(extract) vs 문서 분석(analyze)
 type OcrMode = 'extract' | 'analyze';
 
-export function OcrPage() {
+type OcrApiClient = {
+  extract: (file: File) => Promise<unknown>;
+  analyze: (file: File) => Promise<unknown>;
+};
+
+type OcrPageProps = {
+  api?: OcrApiClient;
+};
+
+export function OcrPage({ api = ocrApi }: OcrPageProps) {
   const [mode, setMode] = useState<OcrMode>('extract'); // 현재 선택된 모드
   const [selectedFile, setSelectedFile] = useState<File | null>(null); // 업로드된 파일
   const [previewUrl, setPreviewUrl] = useState<string | null>(null); // 이미지 미리보기 URL
@@ -27,7 +36,7 @@ export function OcrPage() {
     error: extractError,
     reset: resetExtract,
   } = useMutation({
-    mutationFn: ocrApi.extract,
+    mutationFn: api.extract,
   });
 
   // 문서 분석 Mutation
@@ -38,7 +47,7 @@ export function OcrPage() {
     error: analyzeError,
     reset: resetAnalyze,
   } = useMutation({
-    mutationFn: ocrApi.analyze,
+    mutationFn: api.analyze,
   });
 
   const isPending = isExtractPending || isAnalyzePending;

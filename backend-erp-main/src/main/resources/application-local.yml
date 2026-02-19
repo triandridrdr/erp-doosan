@@ -4,12 +4,6 @@ spring:
       region:
         static: ap-southeast-3
 
-aws:
-  textract-region: ap-southeast-3
-  credentials:
-    access-key: ${AWS_ACCESS_KEY_ID:}
-    secret-key: ${AWS_SECRET_ACCESS_KEY:}
-
   # NOTE: Sebelumnya local profile memakai AWS Parameter Store.
   # Kalau baris ini aktif, aplikasi akan mencoba ambil config dari AWS saat startup.
   # Untuk jalan full lokal, biarkan tetap remark.
@@ -56,6 +50,13 @@ springdoc:
   api-docs:
     enabled: true
 
+ocr:
+  engine: python
+  python:
+    base-url: http://localhost:8001
+    engine: paddle
+    preprocess: true
+
 # 로깅 설정
 logging:
   level:
@@ -75,7 +76,7 @@ aws:
     secret-key: ${AWS_SECRET_KEY:}
   #region: ${AWS_REGION}
   region: ${AWS_REGION:}
-  textract-region: ap-southeast-1
+  textract-region: ap-southeast-3
 
 # 파일 업로드 설정
 spring.servlet.multipart:

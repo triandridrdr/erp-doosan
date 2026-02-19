@@ -66,6 +66,14 @@ public class OcrController {
         return ResponseEntity.ok(ApiResponse.success(response, "텍스트 추출이 완료되었습니다"));
     }
 
+    @PostMapping(value = "/python/extract", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ApiResponse<OcrResponse>> extractTextWithPython(
+            @RequestParam("file") MultipartFile file
+    ) {
+        OcrResponse response = ocrService.extractTextWithPython(file);
+        return ResponseEntity.ok(ApiResponse.success(response, "텍스트 추출이 완료되었습니다"));
+    }
+
     /**
      * 문서 분석 API (테이블/폼 추출)
      *
@@ -104,6 +112,14 @@ public class OcrController {
             @RequestParam("file") MultipartFile file
     ) {
         DocumentAnalysisResponse response = ocrService.analyzeDocument(file);
+        return ResponseEntity.ok(ApiResponse.success(response, "문서 분석이 완료되었습니다"));
+    }
+
+    @PostMapping(value = "/python/analyze", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ApiResponse<DocumentAnalysisResponse>> analyzeDocumentWithPython(
+            @RequestParam("file") MultipartFile file
+    ) {
+        DocumentAnalysisResponse response = ocrService.analyzeDocumentWithPython(file);
         return ResponseEntity.ok(ApiResponse.success(response, "문서 분석이 완료되었습니다"));
     }
 }

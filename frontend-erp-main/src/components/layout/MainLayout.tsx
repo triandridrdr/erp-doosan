@@ -18,6 +18,7 @@ export function MainLayout() {
       '/inventory': 'Inventory',
       '/accounting': 'Accounting',
       '/ocr': 'OCR Extraction',
+      '/ocr-python': 'OCR with Python',
     }[location.pathname] || 'Overview';
 
   return (
