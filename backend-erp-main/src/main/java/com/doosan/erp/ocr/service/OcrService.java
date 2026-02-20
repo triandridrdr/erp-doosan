@@ -82,16 +82,6 @@ public class OcrService {
         validateFile(file);
 
         try {
-            if (ocrProperties.getEngine() == OcrProperties.Engine.python) {
-                PythonOcrExtractResponse response = pythonOcrClient.extract(
-                        ocrProperties.getPython().getBaseUrl(),
-                        file,
-                        ocrProperties.getPython().getEngine(),
-                        ocrProperties.getPython().isPreprocess()
-                );
-                return buildOcrResponseFromPython(response);
-            }
-
             byte[] fileBytes = file.getBytes();
             DetectDocumentTextResponse response = awsTextractClient.detectDocumentText(fileBytes);
             return buildOcrResponse(response);
@@ -240,16 +230,6 @@ public class OcrService {
         validateFile(file);
 
         try {
-            if (ocrProperties.getEngine() == OcrProperties.Engine.python) {
-                PythonOcrExtractResponse response = pythonOcrClient.extract(
-                        ocrProperties.getPython().getBaseUrl(),
-                        file,
-                        ocrProperties.getPython().getEngine(),
-                        ocrProperties.getPython().isPreprocess()
-                );
-                return buildDocumentAnalysisResponseFromPython(response);
-            }
-
             byte[] fileBytes = file.getBytes();
             List<FeatureType> features = List.of(FeatureType.TABLES, FeatureType.FORMS);
             AnalyzeDocumentResponse response = awsTextractClient.analyzeDocument(fileBytes, features);
