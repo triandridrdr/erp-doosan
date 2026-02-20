@@ -766,16 +766,132 @@ def _extract_fields_from_text(text: str) -> Dict[str, Any]:
         return g or None
 
     fields: Dict[str, Any] = {}
-    fields["order_no"] = _first(r"\border\s*nr\b\s*[:\-]?\s*([A-Z0-9\-\/]+)")
-    fields["date"] = _first(r"\bdate\b\s*[:\-]?\s*([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})")
-    fields["supplier"] = _first(r"\bsupplier\b\s*[:\-]?\s*(.+)")
+    fields["order_no"] = _first(r"\b(order\s*(?:nr|no|number)|no\.?\s*order|nomor\s*order|no\.?\s*so|sales\s*order\s*(?:no|number)|nomor\s*so)\b\s*[:\-]?\s*([A-Z0-9\-\/]+)")
+    if fields.get("order_no") and isinstance(fields.get("order_no"), str):
+        m = re.search(r"([A-Z0-9\-\/]+)", fields["order_no"], flags=re.IGNORECASE)
+        fields["order_no"] = (m.group(1) if m else fields["order_no"]).strip()
+
+    fields["date"] = _first(r"\b(date|tanggal|tgl)\b\s*[:\-]?\s*([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})")
+    if fields.get("date") and isinstance(fields.get("date"), str):
+        m = re.search(r"([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})", fields["date"])
+        fields["date"] = (m.group(1) if m else fields["date"]).strip()
+
+    fields["supplier"] = _first(r"\b(supplier|vendor|pemasok)\b\s*[:\-]?\s*(.+)")
     fields["season"] = _first(r"\bseason\b\s*[:\-]?\s*([A-Z0-9\s]+)")
-    fields["buyer"] = _first(r"\bbuyer\b\s*[:\-]?\s*([A-Z0-9\s]+)")
-    fields["payment_terms"] = _first(r"\bpayment\s*terms\b\s*[:\-]?\s*(.+)")
-    fields["purchaser"] = _first(r"\bpurchaser\b\s*[:\-]?\s*(.+)")
+    fields["buyer"] = _first(r"\b(buyer|pembeli)\b\s*[:\-]?\s*([A-Z0-9\s]+)")
+    if fields.get("buyer") and isinstance(fields.get("buyer"), str):
+        fields["buyer"] = fields["buyer"].strip()
+
+    fields["payment_terms"] = _first(r"\b(payment\s*terms|terms\s*of\s*payment|syarat\s*pembayaran)\b\s*[:\-]?\s*(.+)")
+    fields["purchaser"] = _first(r"\b(purchaser|pemesan)\b\s*[:\-]?\s*(.+)")
+
+    fields["send_to"] = _first(r"\b(send\s*to|kirim\s*ke|ship\s*to)\b\s*[:\-]?\s*(.+)")
+    fields["tax_office_number"] = _first(r"\btax\s*office\s*number\b\s*[:\-]?\s*([0-9]{8,})")
 
     cleaned = {k: v for k, v in fields.items() if v is not None}
     return cleaned
+
+
+def _norm_key(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").strip().lower())
+
+
+def _extract_fields_from_tables(tables: List[Dict[str, Any]]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if not tables:
+        return out
+
+    # Look for header->value row mappings in any detected table
+    key_aliases = {
+        "order_no": {"ordernr", "ordernumber", "order", "order-no", "order_nr"},
+        "date": {"date", "orderdate"},
+        "supplier": {"supplier", "vendor"},
+        "season": {"season"},
+        "buyer": {"buyer"},
+        "payment_terms": {"paymentterms", "payment"},
+        "purchaser": {"purchaser"},
+    }
+
+    for tbl in tables:
+        rows = tbl.get("rows") or []
+        if not isinstance(rows, list):
+            continue
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            for hk, hv in r.items():
+                nk = _norm_key(str(hk))
+                val = (str(hv) if hv is not None else "").strip()
+                if not val:
+                    continue
+                for field, aliases in key_aliases.items():
+                    if field in out:
+                        continue
+                    if nk in {_norm_key(a) for a in aliases}:
+                        out[field] = val
+                        break
+
+    return out
+
+
+def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # Prefer table-derived values when available (usually cleaner)
+    t_fields = _extract_fields_from_text(text)
+    tbl_fields = _extract_fields_from_tables(tables)
+
+    merged = {**t_fields, **{k: v for k, v in tbl_fields.items() if v is not None}}
+
+    # Heuristic: label on one line, value on next line (common in sales order headers)
+    lines = [ln.strip() for ln in (text or "").replace("\r", "\n").split("\n")]
+    label_map = {
+        "order_no": {"order-nr", "order nr", "order no", "order number", "no order", "no. order", "no so", "no. so", "sales order", "sales order no", "nomor so"},
+        "date": {"date", "tanggal", "tgl"},
+        "supplier": {"supplier", "vendor", "pemasok"},
+        "season": {"season"},
+        "buyer": {"buyer", "pembeli"},
+        "payment_terms": {"payment terms", "terms of payment", "syarat pembayaran"},
+        "purchaser": {"purchaser", "pemesan"},
+    }
+
+    def _is_label(s: str, candidates: set) -> bool:
+        ns = _norm_key(s)
+        return any(ns == _norm_key(c) for c in candidates)
+
+    for i, ln in enumerate(lines[:-1]):
+        nxt = lines[i + 1]
+        if not ln or not nxt:
+            continue
+
+        for field, aliases in label_map.items():
+            if field in merged:
+                continue
+            if not _is_label(ln, aliases):
+                continue
+
+            if field == "date":
+                m = re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", nxt)
+                if m:
+                    merged[field] = m.group(1)
+            elif field == "order_no":
+                m = re.search(r"\b([A-Z0-9\-\/]+)\b", nxt, flags=re.IGNORECASE)
+                if m:
+                    merged[field] = m.group(1)
+            else:
+                merged[field] = nxt.strip()
+
+    # Fallback: if DATE label missed, still try to pick a date candidate
+    if "date" not in merged:
+        m = re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", text or "")
+        if m:
+            merged["date"] = (m.group(1) or "").strip()
+
+    # Fallback: if ORDER-NR label missed, try to grab a nearby order-like token
+    if "order_no" not in merged:
+        m = re.search(r"\b(\d{3,}[A-Z]?\-\w+)\b", text or "")
+        if m:
+            merged["order_no"] = (m.group(1) or "").strip()
+
+    return merged
 
 
 def _postprocess_ocr_text(text: str) -> str:
@@ -982,7 +1098,7 @@ async def ocr_extract(
                 page_res = _run_paddle_structure(_ensure_bgr(input_for_ocr))
                 page_res["avg_confidence"] = None
                 page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
-                page_res["fields"] = _extract_fields_from_text(page_res.get("text") or "")
+                page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
             elif engine == "paddle_ensemble":
                 bgr = _ensure_bgr(input_for_ocr)
                 struct_res = _run_paddle_structure(bgr)
@@ -1004,7 +1120,7 @@ async def ocr_extract(
                 if not page_res.get("tables"):
                     page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, {"lines": page_res.get("lines")})
 
-                page_res["fields"] = _extract_fields_from_text(merged_text)
+                page_res["fields"] = _extract_fields_smart(merged_text, page_res.get("tables") or [])
             else:
                 # paddle expects bgr
                 page_res = _run_paddle(_ensure_bgr(input_for_ocr))
@@ -1014,6 +1130,8 @@ async def ocr_extract(
 
             if engine == "paddle":
                 page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, page_res)
+                page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
+                page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
 
             all_pages.append(page_res)
             combined_texts.append(_postprocess_ocr_text(page_res.get("text") or ""))

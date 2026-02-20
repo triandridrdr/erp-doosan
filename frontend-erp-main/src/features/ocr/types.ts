@@ -17,6 +17,10 @@ export interface OcrResponseData {
   extractedText: string; // 전체 결합 텍스트
   blocks: TextBlockDto[]; // 개별 텍스트 블록 리스트
   averageConfidence: number; // 평균 신뢰도
+
+  // (Optional) Python OCR 등에서 제공될 수 있는 구조화 데이터
+  tables?: TableDto[];
+  formFields?: Record<string, string>;
 }
 
 // OCR API 응답 구조

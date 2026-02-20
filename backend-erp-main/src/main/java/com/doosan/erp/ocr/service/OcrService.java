@@ -13,6 +13,7 @@ import com.doosan.erp.ocr.dto.TableDto;
 import com.doosan.erp.ocr.dto.TextBlockDto;
 import com.doosan.erp.ocr.dto.python.PythonOcrExtractResponse;
 import com.doosan.erp.ocr.dto.python.PythonOcrPageResult;
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -28,6 +29,7 @@ import software.amazon.awssdk.services.textract.model.TextractException;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -164,11 +166,125 @@ public class OcrService {
                 .average()
                 .orElse(0.0);
 
+        Map<String, String> formFields = parsePythonFields(response.getFields());
+        List<TableDto> tables = parsePythonTables(response.getTables());
+
         return OcrResponse.builder()
                 .extractedText(extractedText)
                 .blocks(blocks)
                 .averageConfidence(averageConfidence)
+                .formFields(formFields)
+                .tables(tables)
                 .build();
+    }
+
+    private Map<String, String> parsePythonFields(JsonNode fieldsNode) {
+        if (fieldsNode == null || fieldsNode.isNull() || !fieldsNode.isObject()) {
+            return Map.of();
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        Iterator<Map.Entry<String, JsonNode>> it = fieldsNode.fields();
+        while (it.hasNext()) {
+            Map.Entry<String, JsonNode> e = it.next();
+            String k = e.getKey();
+            if (k == null || k.isBlank()) {
+                continue;
+            }
+            JsonNode v = e.getValue();
+            if (v == null || v.isNull()) {
+                continue;
+            }
+            String s = v.isTextual() ? v.asText() : v.toString();
+            if (s != null && !s.isBlank()) {
+                out.put(k, s.trim());
+            }
+        }
+        return out;
+    }
+
+    private List<TableDto> parsePythonTables(JsonNode tablesNode) {
+        if (tablesNode == null || tablesNode.isNull() || !tablesNode.isArray()) {
+            return List.of();
+        }
+
+        List<TableDto> out = new ArrayList<>();
+        int idx = 0;
+        for (JsonNode tbl : tablesNode) {
+            if (tbl == null || tbl.isNull() || !tbl.isObject()) {
+                continue;
+            }
+            JsonNode headersNode = tbl.get("headers");
+            JsonNode rowsNode = tbl.get("rows");
+            if (headersNode == null || !headersNode.isArray() || rowsNode == null || !rowsNode.isArray()) {
+                continue;
+            }
+
+            List<String> headers = new ArrayList<>();
+            for (JsonNode h : headersNode) {
+                if (h != null && !h.isNull()) {
+                    headers.add(h.asText(""));
+                }
+            }
+            if (headers.isEmpty()) {
+                continue;
+            }
+
+            List<List<String>> matrix = new ArrayList<>();
+            matrix.add(headers);
+
+            for (JsonNode r : rowsNode) {
+                if (r == null || r.isNull()) {
+                    continue;
+                }
+                // Python table rows are usually objects: {header: value}
+                if (r.isObject()) {
+                    List<String> rowVals = new ArrayList<>();
+                    for (String h : headers) {
+                        JsonNode v = r.get(h);
+                        rowVals.add(v == null || v.isNull() ? "" : v.asText(""));
+                    }
+                    if (rowVals.stream().anyMatch(s -> s != null && !s.isBlank())) {
+                        matrix.add(rowVals);
+                    }
+                } else if (r.isArray()) {
+                    List<String> rowVals = new ArrayList<>();
+                    for (JsonNode v : r) {
+                        rowVals.add(v == null || v.isNull() ? "" : v.asText(""));
+                    }
+                    if (rowVals.stream().anyMatch(s -> s != null && !s.isBlank())) {
+                        matrix.add(rowVals);
+                    }
+                }
+            }
+
+            if (matrix.size() <= 1) {
+                continue;
+            }
+
+            Map<String, String> headerToFirstRowMap = new LinkedHashMap<>();
+            if (matrix.size() >= 2) {
+                List<String> firstDataRow = matrix.get(1);
+                for (int i = 0; i < headers.size() && i < firstDataRow.size(); i++) {
+                    String key = headers.get(i);
+                    String val = firstDataRow.get(i);
+                    if (key != null && !key.isBlank() && val != null && !val.isBlank()) {
+                        headerToFirstRowMap.put(key, val);
+                    }
+                }
+            }
+
+            out.add(TableDto.builder()
+                    .tableIndex(idx)
+                    .rowCount(matrix.size())
+                    .columnCount(headers.size())
+                    .cells(List.of())
+                    .rows(matrix)
+                    .headerToFirstRowMap(headerToFirstRowMap)
+                    .build());
+            idx++;
+        }
+
+        return out;
     }
 
     /**

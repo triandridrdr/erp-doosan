@@ -6,6 +6,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * OCR 텍스트 추출 응답 DTO
@@ -27,4 +28,10 @@ public class OcrResponse {
 
     // 평균 신뢰도 (0.0 ~ 100.0)
     private Float averageConfidence;
+
+    // (Optional) 추출된 테이블 목록 (Python OCR 등에서 제공될 수 있음)
+    private List<TableDto> tables;
+
+    // (Optional) 키-값 필드 (Python OCR 등에서 제공될 수 있음)
+    private Map<String, String> formFields;
 }
