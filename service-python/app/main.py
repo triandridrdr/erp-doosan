@@ -49,6 +49,13 @@ def preprocess_opencv(image_bgr: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]
     meta: Dict[str, Any] = {}
     bgr = _ensure_bgr(image_bgr)
 
+    # upscale for small text
+    h, w = bgr.shape[:2]
+    if max(h, w) < 900:
+        scale = 2.0
+        bgr = cv2.resize(bgr, dsize=None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        meta["step_upscale"] = f"resize(fx={scale}, fy={scale}, interpolation=INTER_CUBIC)"
+
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     meta["step_gray"] = True
 
@@ -66,6 +73,11 @@ def preprocess_opencv(image_bgr: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]
         9,
     )
     meta["step_threshold"] = "adaptiveThreshold(blockSize=31, C=9)"
+
+    # If background is mostly dark (e.g. white text on black), invert to improve OCR stability.
+    if float(np.mean(thr)) < 127.0:
+        thr = 255 - thr
+        meta["step_invert"] = True
 
     return thr, meta
 
@@ -162,8 +174,9 @@ def _get_paddle_ocr() -> "PaddleOCR":
         if PaddleOCR is None:
             raise RuntimeError("paddleocr not installed")
 
-        # Use English by default; adjust later if needed.
-        _paddle_ocr_singleton = PaddleOCR(use_angle_cls=True, lang="en")
+        # Use latin model by default (works better for Indonesian than 'en').
+        lang = os.getenv("PADDLE_OCR_LANG") or "latin"
+        _paddle_ocr_singleton = PaddleOCR(use_angle_cls=True, lang=lang, use_space_char=True)
     return _paddle_ocr_singleton
 
 
