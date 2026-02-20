@@ -90,8 +90,20 @@ public class OcrService {
             log.error("파일 읽기 실패: {}", e.getMessage());
             throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
         } catch (TextractException e) {
-            log.error("Textract API 호출 실패: {}", e.getMessage());
-            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
+            String detailedMessage = "Textract API 호출 실패";
+
+            if (e.awsErrorDetails() != null && e.awsErrorDetails().errorMessage() != null) {
+                detailedMessage = detailedMessage + ": " + e.awsErrorDetails().errorMessage();
+            } else if (e.getMessage() != null) {
+                detailedMessage = detailedMessage + ": " + e.getMessage();
+            }
+
+            if (e.requestId() != null) {
+                detailedMessage = detailedMessage + " (requestId=" + e.requestId() + ")";
+            }
+
+            log.error("{}", detailedMessage, e);
+            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, detailedMessage);
         } catch (Exception e) {
             log.error("OCR 호출 실패: {}", e.getMessage());
             throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
@@ -239,8 +251,20 @@ public class OcrService {
             log.error("파일 읽기 실패: {}", e.getMessage());
             throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
         } catch (TextractException e) {
-            log.error("Textract API 호출 실패: {}", e.getMessage());
-            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
+            String detailedMessage = "Textract API 호출 실패";
+
+            if (e.awsErrorDetails() != null && e.awsErrorDetails().errorMessage() != null) {
+                detailedMessage = detailedMessage + ": " + e.awsErrorDetails().errorMessage();
+            } else if (e.getMessage() != null) {
+                detailedMessage = detailedMessage + ": " + e.getMessage();
+            }
+
+            if (e.requestId() != null) {
+                detailedMessage = detailedMessage + " (requestId=" + e.requestId() + ")";
+            }
+
+            log.error("{}", detailedMessage, e);
+            throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, detailedMessage);
         } catch (Exception e) {
             log.error("OCR 호출 실패: {}", e.getMessage());
             throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
