@@ -778,6 +778,49 @@ def _extract_fields_from_text(text: str) -> Dict[str, Any]:
     return cleaned
 
 
+def _postprocess_ocr_text(text: str) -> str:
+    t = (text or "").replace("\r", "\n")
+    if not t.strip():
+        return (text or "").strip()
+
+    def _fix_line(line: str) -> str:
+        s = line
+        s = re.sub(r",(?=\S)", ", ", s)
+        s = re.sub(r"(?<=\S)\((?=\S)", " (", s)
+        s = re.sub(r"(?<=\S)\)(?=\S)", ") ", s)
+
+        # Temperature degree symbol reconstruction
+        # Examples: "30 C" -> "30°C", "230 F" -> "230°F"
+        s = re.sub(r"\b(\d{1,3})\s*(?:°\s*)?C\b", r"\1°C", s)
+        s = re.sub(r"\b(\d{1,3})\s*(?:°\s*)?F\b", r"\1°F", s)
+
+        # Separate common ALLCAPS glued tokens (keep codes with hyphen/slash intact)
+        s = re.sub(r"\bTOTAL\s*ORDER\b", "TOTAL ORDER", s, flags=re.IGNORECASE)
+        s = re.sub(r"\bTOTALORDER\b", "TOTAL ORDER", s, flags=re.IGNORECASE)
+        s = re.sub(r"\bPAYMENT\s*TERMS\b", "PAYMENT TERMS", s, flags=re.IGNORECASE)
+        s = re.sub(r"\bPAYMENTTERMS\b", "PAYMENT TERMS", s, flags=re.IGNORECASE)
+        s = re.sub(r"\bMARKETOF\b", "MARKET OF", s, flags=re.IGNORECASE)
+        s = re.sub(r"\bTAX\s*OFFICE\s*NUMBER\b", "Tax office number", s, flags=re.IGNORECASE)
+
+        # EMEAAspire -> EMEA Aspire
+        s = re.sub(r"\b([A-Z]{2,})([A-Z][a-z])", r"\1 \2", s)
+
+        # Insert spaces between letters and digits
+        s = re.sub(r"(?<=[A-Za-z])(?=\d)", " ", s)
+        s = re.sub(r"(?<=\d)(?=[A-Za-z])", " ", s)
+
+        # Normalize spaces but preserve newlines by operating per line
+        s = re.sub(r"[\t ]+", " ", s)
+        return s.strip()
+
+    lines = t.split("\n")
+    fixed_lines = [_fix_line(ln) for ln in lines]
+    # Keep blank lines, but cap very long blank runs
+    out = "\n".join(fixed_lines)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 def _text_quality_score(text: str) -> float:
     s = (text or "").strip()
     if not s:
@@ -938,6 +981,7 @@ async def ocr_extract(
                 # structure expects bgr
                 page_res = _run_paddle_structure(_ensure_bgr(input_for_ocr))
                 page_res["avg_confidence"] = None
+                page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
                 page_res["fields"] = _extract_fields_from_text(page_res.get("text") or "")
             elif engine == "paddle_ensemble":
                 bgr = _ensure_bgr(input_for_ocr)
@@ -945,6 +989,7 @@ async def ocr_extract(
                 paddle_res = _run_paddle(bgr)
 
                 merged_text = _merge_text(struct_res.get("text") or "", paddle_res.get("text") or "", paddle_res.get("avg_confidence"))
+                merged_text = _postprocess_ocr_text(merged_text)
 
                 page_res = {
                     "engine": "paddle_ensemble",
@@ -971,7 +1016,7 @@ async def ocr_extract(
                 page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, page_res)
 
             all_pages.append(page_res)
-            combined_texts.append(page_res.get("text") or "")
+            combined_texts.append(_postprocess_ocr_text(page_res.get("text") or ""))
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"OCR failed on page {page_idx}: {e}")
 
