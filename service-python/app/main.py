@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import base64
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -41,6 +42,16 @@ except Exception:  # pragma: no cover
     pdfplumber = None
 
 app = FastAPI(title="Python OCR Service", version="0.1.0")
+
+try:
+    from celery.result import AsyncResult
+
+    from .celery_app import celery_app
+    from .tasks import ocr_extract_task
+except Exception:  # pragma: no cover
+    AsyncResult = None
+    celery_app = None
+    ocr_extract_task = None
 
 
 _ENGINE = Literal["tesseract", "paddle", "paddle_structure", "paddle_ensemble"]
@@ -1064,6 +1075,187 @@ def _run_paddle(image_bgr: np.ndarray) -> Dict[str, Any]:
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"status": "ok"}
+
+
+def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
+    filename = str(payload.get("filename") or "uploaded")
+    engine = payload.get("engine") or "tesseract"
+    preprocess = bool(payload.get("preprocess", True))
+    preprocess_mode = payload.get("preprocess_mode") or "basic"
+    file_b64 = payload.get("file_b64")
+
+    if not isinstance(file_b64, str) or not file_b64:
+        raise ValueError("Missing file_b64")
+
+    try:
+        file_bytes = base64.b64decode(file_b64.encode("utf-8"), validate=False)
+    except Exception as e:
+        raise ValueError(f"Invalid file_b64: {e}")
+
+    if not file_bytes:
+        raise ValueError("Empty file")
+
+    if filename.lower().endswith(".pdf"):
+        pages_text = _pdf_text_pages(file_bytes)
+        joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
+        if joined and len(joined) >= 50:
+            all_pages: List[Dict[str, Any]] = []
+            combined_texts: List[str] = []
+            for i, t in enumerate(pages_text or [], start=1):
+                pp_text = _postprocess_ocr_text(t or "")
+                page_res: Dict[str, Any] = {
+                    "engine": "pdfplumber",
+                    "page": i,
+                    "text": pp_text,
+                    "tables": [],
+                    "fields": _extract_fields_smart(pp_text, []),
+                    "preprocess": {"enabled": False, "target": "pdf_text"},
+                }
+                all_pages.append(page_res)
+                if pp_text.strip():
+                    combined_texts.append(pp_text.strip())
+
+            combined_fields: List[Dict[str, Any]] = []
+            for p in all_pages:
+                if p.get("fields"):
+                    combined_fields.append({"page": p.get("page"), **(p.get("fields") or {})})
+
+            return {
+                "filename": filename,
+                "engine": "pdfplumber",
+                "pages": all_pages,
+                "text": "\n\n".join(combined_texts).strip(),
+                "tables": [],
+                "fields": combined_fields,
+            }
+
+    images_bgr = _images_from_upload(filename, file_bytes)
+
+    all_pages: List[Dict[str, Any]] = []
+    combined_texts: List[str] = []
+    for page_idx, img_bgr in enumerate(images_bgr, start=1):
+        prep_meta: Dict[str, Any] = {"enabled": preprocess}
+
+        if preprocess:
+            if engine in ("paddle", "paddle_structure", "paddle_ensemble"):
+                processed_bgr, meta = preprocess_paddle_mode(img_bgr, preprocess_mode)
+                prep_meta.update({"target": "paddle"})
+                prep_meta.update(meta)
+                input_for_ocr = processed_bgr
+                image_for_tables = processed_bgr
+            else:
+                processed_gray, meta = preprocess_opencv_mode(img_bgr, preprocess_mode)
+                prep_meta.update({"target": "tesseract"})
+                prep_meta.update(meta)
+                input_for_ocr = processed_gray
+                image_for_tables = processed_gray
+        else:
+            input_for_ocr = img_bgr
+            image_for_tables = img_bgr
+
+        if engine == "tesseract":
+            page_res = _run_tesseract(input_for_ocr)
+        elif engine == "paddle_structure":
+            page_res = _run_paddle_structure(_ensure_bgr(input_for_ocr))
+            page_res["avg_confidence"] = None
+            page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
+            page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
+        elif engine == "paddle_ensemble":
+            bgr = _ensure_bgr(input_for_ocr)
+            struct_res = _run_paddle_structure(bgr)
+            paddle_res = _run_paddle(bgr)
+            merged_text = _merge_text(struct_res.get("text") or "", paddle_res.get("text") or "", paddle_res.get("avg_confidence"))
+            merged_text = _postprocess_ocr_text(merged_text)
+            page_res = {
+                "engine": "paddle_ensemble",
+                "layout": struct_res.get("layout") or [],
+                "tables": struct_res.get("tables") or [],
+                "text": merged_text,
+                "avg_confidence": paddle_res.get("avg_confidence"),
+                "lines": paddle_res.get("lines") or [],
+            }
+            if not page_res.get("tables"):
+                page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, {"lines": page_res.get("lines")})
+            page_res["fields"] = _extract_fields_smart(merged_text, page_res.get("tables") or [])
+        else:
+            page_res = _run_paddle(_ensure_bgr(input_for_ocr))
+
+        page_res["page"] = page_idx
+        page_res["preprocess"] = prep_meta
+
+        if engine == "paddle":
+            page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, page_res)
+            page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
+            page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
+
+        all_pages.append(page_res)
+        combined_texts.append(_postprocess_ocr_text(page_res.get("text") or ""))
+
+    combined_tables: List[Dict[str, Any]] = []
+    for p in all_pages:
+        for t in (p.get("tables") or []):
+            combined_tables.append({"page": p.get("page"), **t})
+
+    combined_fields: List[Dict[str, Any]] = []
+    for p in all_pages:
+        if p.get("fields"):
+            combined_fields.append({"page": p.get("page"), **(p.get("fields") or {})})
+
+    return {
+        "filename": filename,
+        "engine": engine,
+        "pages": all_pages,
+        "text": "\n\n".join(combined_texts).strip(),
+        "tables": combined_tables,
+        "fields": combined_fields,
+    }
+
+
+@app.post("/ocr/extract/async")
+async def ocr_extract_async(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    engine: _ENGINE = Query("tesseract"),
+    preprocess: bool = Query(True),
+    preprocess_mode: _PREPROCESS_MODE = Query("basic"),
+) -> JSONResponse:
+    if ocr_extract_task is None:
+        raise HTTPException(status_code=503, detail="Celery not available")
+
+    if file is not None:
+        filename = file.filename or "uploaded"
+        file_bytes = await file.read()
+    else:
+        filename = request.headers.get("x-filename") or "uploaded"
+        file_bytes = await request.body()
+
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    payload = {
+        "filename": filename,
+        "engine": engine,
+        "preprocess": preprocess,
+        "preprocess_mode": preprocess_mode,
+        "file_b64": base64.b64encode(file_bytes).decode("utf-8"),
+    }
+
+    job = ocr_extract_task.delay(payload)
+    return JSONResponse({"task_id": job.id, "status": "PENDING"})
+
+
+@app.get("/ocr/jobs/{task_id}")
+def ocr_job_status(task_id: str) -> JSONResponse:
+    if AsyncResult is None or celery_app is None:
+        raise HTTPException(status_code=503, detail="Celery not available")
+
+    res = AsyncResult(task_id, app=celery_app)
+    status = str(res.status)
+    if res.successful():
+        return JSONResponse({"task_id": task_id, "status": status, "result": res.result})
+    if res.failed():
+        return JSONResponse({"task_id": task_id, "status": status, "error": str(res.result)})
+    return JSONResponse({"task_id": task_id, "status": status})
 
 
 @app.post("/ocr/extract")
