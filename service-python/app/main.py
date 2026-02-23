@@ -1,3 +1,4 @@
+import io
 import os
 import re
 from html.parser import HTMLParser
@@ -8,6 +9,11 @@ import numpy as np
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 from PIL import Image
+
+try:
+    from rapidfuzz import fuzz
+except Exception:  # pragma: no cover
+    fuzz = None
 
 try:
     import pytesseract
@@ -28,6 +34,11 @@ try:
     from pdf2image import convert_from_bytes
 except Exception:  # pragma: no cover
     convert_from_bytes = None
+
+try:
+    import pdfplumber
+except Exception:  # pragma: no cover
+    pdfplumber = None
 
 app = FastAPI(title="Python OCR Service", version="0.1.0")
 
@@ -229,6 +240,22 @@ def _try_perspective_normalize(image_bgr: np.ndarray) -> np.ndarray:
             return _four_point_transform(bgr, pts)
 
     return bgr
+
+
+def _pdf_text_pages(file_bytes: bytes) -> Optional[List[str]]:
+    if pdfplumber is None:
+        return None
+
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            pages_text: List[str] = []
+            for p in pdf.pages:
+                txt = p.extract_text() or ""
+                txt = txt.replace("\r", "\n").strip()
+                pages_text.append(txt)
+        return pages_text
+    except Exception:
+        return None
 
 
 def _estimate_skew_angle_deg(binary_img: np.ndarray) -> float:
@@ -855,7 +882,22 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
 
     def _is_label(s: str, candidates: set) -> bool:
         ns = _norm_key(s)
-        return any(ns == _norm_key(c) for c in candidates)
+        if any(ns == _norm_key(c) for c in candidates):
+            return True
+        if fuzz is None:
+            return False
+
+        # OCR often introduces minor typos. Use fuzzy match against normalized candidates.
+        # Example: "0rder nr" -> "order nr"
+        best = 0.0
+        for c in candidates:
+            nc = _norm_key(str(c))
+            if not nc:
+                continue
+            score = float(fuzz.ratio(ns, nc))
+            if score > best:
+                best = score
+        return best >= 90.0
 
     for i, ln in enumerate(lines[:-1]):
         nxt = lines[i + 1]
@@ -1049,6 +1091,43 @@ async def ocr_extract(
                 "content_type": content_type,
             },
         )
+
+    # If PDF has embedded text (selectable text), prefer extracting it directly.
+    if filename.lower().endswith(".pdf"):
+        pages_text = _pdf_text_pages(file_bytes)
+        joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
+        if joined and len(joined) >= 50:
+            all_pages: List[Dict[str, Any]] = []
+            combined_texts: List[str] = []
+            for i, t in enumerate(pages_text or [], start=1):
+                pp_text = _postprocess_ocr_text(t or "")
+                page_res: Dict[str, Any] = {
+                    "engine": "pdfplumber",
+                    "page": i,
+                    "text": pp_text,
+                    "tables": [],
+                    "fields": _extract_fields_smart(pp_text, []),
+                    "preprocess": {"enabled": False, "target": "pdf_text"},
+                }
+                all_pages.append(page_res)
+                if pp_text.strip():
+                    combined_texts.append(pp_text.strip())
+
+            combined_fields: List[Dict[str, Any]] = []
+            for p in all_pages:
+                if p.get("fields"):
+                    combined_fields.append({"page": p.get("page"), **(p.get("fields") or {})})
+
+            return JSONResponse(
+                {
+                    "filename": filename,
+                    "engine": "pdfplumber",
+                    "pages": all_pages,
+                    "text": "\n\n".join(combined_texts).strip(),
+                    "tables": [],
+                    "fields": combined_fields,
+                }
+            )
 
     try:
         images_bgr = _images_from_upload(filename, file_bytes)
