@@ -375,38 +375,8 @@ export function OcrPage({ api = ocrApi }: OcrPageProps) {
                     </div>
                   </div>
 
-                  {(extractResult.data.formFields || extractResult.data.tables) && (
+                  {extractResult.data.tables && (
                     <div className='space-y-6'>
-                      {extractResult.data.formFields && Object.keys(extractResult.data.formFields).length > 0 && (
-                        <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
-                          <div className='bg-gray-50 px-4 py-3 border-b border-gray-200 flex justify-between items-center'>
-                            <h3 className='font-semibold text-gray-900'>AI Data Model (Fields)</h3>
-                            <span className='text-xs text-gray-500'>key - value</span>
-                          </div>
-                          <div className='p-4'>
-                            <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4'>
-                              {Object.entries(extractResult.data.formFields)
-                                .sort(([a], [b]) => a.localeCompare(b))
-                                .map(([k, v]) => (
-                                  <div
-                                    key={k}
-                                    className='p-3 rounded-lg border border-gray-100 hover:bg-gray-50 transition-colors flex justify-between items-start text-sm'
-                                  >
-                                    <div className='flex-1 pr-2'>
-                                      <span className='text-gray-500 text-xs block mb-1'>Variable</span>
-                                      <span className='text-gray-700 font-medium break-words'>{k}</span>
-                                    </div>
-                                    <div className='flex-1 text-right pl-2 border-l border-gray-100'>
-                                      <span className='text-gray-500 text-xs block mb-1'>Value</span>
-                                      <span className='text-gray-900 break-words'>{v}</span>
-                                    </div>
-                                  </div>
-                                ))}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
                       {extractResult.data.tables && extractResult.data.tables.length > 0 && (
                         <div className='space-y-4'>
                           <h3 className='font-bold text-lg text-gray-900 flex items-center'>

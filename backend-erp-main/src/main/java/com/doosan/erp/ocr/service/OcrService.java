@@ -185,6 +185,39 @@ public class OcrService {
 
         Map<String, String> out = new LinkedHashMap<>();
 
+        // treat common label tokens as invalid values when merging multi-page fields
+        // (e.g. purchaser="SEND TO" on page 1 but actual purchaser appears on later pages)
+        java.util.function.BiPredicate<String, String> shouldOverride = (existing, candidate) -> {
+            String ex = existing == null ? "" : existing.trim();
+            String ca = candidate == null ? "" : candidate.trim();
+            if (ca.isBlank()) {
+                return false;
+            }
+            if (ex.isBlank()) {
+                return true;
+            }
+            String exNorm = ex.replaceAll("[^a-zA-Z0-9]+", "").toLowerCase();
+            if (Set.of(
+                    "date",
+                    "ordernr",
+                    "orderno",
+                    "order",
+                    "supplier",
+                    "season",
+                    "buyer",
+                    "paymentterms",
+                    "purchaser",
+                    "sendto",
+                    "shipto",
+                    "taxofficenumber",
+                    "compositionlabelpartcolors"
+            ).contains(exNorm)) {
+                return true;
+            }
+            // keep existing by default
+            return false;
+        };
+
         // Python may return fields as an object (single-page/image) or array (per-page fields for PDF)
         if (fieldsNode.isObject()) {
             Iterator<Map.Entry<String, JsonNode>> it = fieldsNode.fields();
@@ -223,8 +256,16 @@ public class OcrService {
                         continue;
                     }
                     String s = v.isTextual() ? v.asText() : v.toString();
-                    if (s != null && !s.isBlank() && !out.containsKey(k)) {
-                        out.put(k, s.trim());
+                    if (s != null && !s.isBlank()) {
+                        String trimmed = s.trim();
+                        if (!out.containsKey(k)) {
+                            out.put(k, trimmed);
+                        } else {
+                            String existing = out.get(k);
+                            if (shouldOverride.test(existing, trimmed)) {
+                                out.put(k, trimmed);
+                            }
+                        }
                     }
                 }
             }
@@ -247,44 +288,74 @@ public class OcrService {
             }
             JsonNode headersNode = tbl.get("headers");
             JsonNode rowsNode = tbl.get("rows");
-            if (headersNode == null || !headersNode.isArray() || rowsNode == null || !rowsNode.isArray()) {
+            JsonNode rowsMatrixNode = tbl.get("rows_matrix");
+            boolean hasHeadersAndRows = headersNode != null && headersNode.isArray() && rowsNode != null && rowsNode.isArray();
+            boolean hasRowsMatrix = rowsMatrixNode != null && rowsMatrixNode.isArray();
+            if (!hasHeadersAndRows && !hasRowsMatrix) {
                 continue;
             }
 
             List<String> headers = new ArrayList<>();
-            for (JsonNode h : headersNode) {
-                if (h != null && !h.isNull()) {
-                    headers.add(h.asText(""));
+            if (hasHeadersAndRows) {
+                for (JsonNode h : headersNode) {
+                    if (h != null && !h.isNull()) {
+                        headers.add(h.asText(""));
+                    }
                 }
-            }
-            if (headers.isEmpty()) {
-                continue;
+                if (headers.isEmpty()) {
+                    continue;
+                }
             }
 
             List<List<String>> matrix = new ArrayList<>();
-            matrix.add(headers);
-
-            for (JsonNode r : rowsNode) {
-                if (r == null || r.isNull()) {
-                    continue;
-                }
-                // Python table rows are usually objects: {header: value}
-                if (r.isObject()) {
-                    List<String> rowVals = new ArrayList<>();
-                    for (String h : headers) {
-                        JsonNode v = r.get(h);
-                        rowVals.add(v == null || v.isNull() ? "" : v.asText(""));
+            if (hasRowsMatrix) {
+                // Python may provide a pre-built matrix including header row as first row
+                for (JsonNode r : rowsMatrixNode) {
+                    if (r == null || r.isNull() || !r.isArray()) {
+                        continue;
                     }
-                    if (rowVals.stream().anyMatch(s -> s != null && !s.isBlank())) {
-                        matrix.add(rowVals);
-                    }
-                } else if (r.isArray()) {
                     List<String> rowVals = new ArrayList<>();
                     for (JsonNode v : r) {
                         rowVals.add(v == null || v.isNull() ? "" : v.asText(""));
                     }
                     if (rowVals.stream().anyMatch(s -> s != null && !s.isBlank())) {
                         matrix.add(rowVals);
+                    }
+                }
+                if (matrix.isEmpty()) {
+                    continue;
+                }
+                if (headers.isEmpty() && !matrix.isEmpty()) {
+                    headers.addAll(matrix.get(0));
+                }
+            } else {
+                matrix.add(headers);
+            }
+
+            // If rows_matrix exists, do NOT also add rows[] again (would duplicate content)
+            if (hasHeadersAndRows && !hasRowsMatrix) {
+                for (JsonNode r : rowsNode) {
+                    if (r == null || r.isNull()) {
+                        continue;
+                    }
+                    // Python table rows are usually objects: {header: value}
+                    if (r.isObject()) {
+                        List<String> rowVals = new ArrayList<>();
+                        for (String h : headers) {
+                            JsonNode v = r.get(h);
+                            rowVals.add(v == null || v.isNull() ? "" : v.asText(""));
+                        }
+                        if (rowVals.stream().anyMatch(s -> s != null && !s.isBlank())) {
+                            matrix.add(rowVals);
+                        }
+                    } else if (r.isArray()) {
+                        List<String> rowVals = new ArrayList<>();
+                        for (JsonNode v : r) {
+                            rowVals.add(v == null || v.isNull() ? "" : v.asText(""));
+                        }
+                        if (rowVals.stream().anyMatch(s -> s != null && !s.isBlank())) {
+                            matrix.add(rowVals);
+                        }
                     }
                 }
             }

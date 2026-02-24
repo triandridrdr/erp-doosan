@@ -2,6 +2,9 @@ import io
 import os
 import re
 import base64
+import time
+import uuid
+import logging
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -40,6 +43,11 @@ try:
     import pdfplumber
 except Exception:  # pragma: no cover
     pdfplumber = None
+
+
+logger = logging.getLogger("python_ocr")
+if not logger.handlers:
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 app = FastAPI(title="Python OCR Service", version="0.1.0")
 
@@ -419,6 +427,7 @@ def _build_ai_kv_table_from_fields(fields: Any) -> Dict[str, Any]:
         "DESCRIPTION",
         "MARKET OF ORIGIN",
         "PVP",
+        "COMPOSITION LABEL / PART COLORS",
         "COMPOSITIONS INFORMATION",
         "CARE INSTRUCTIONS",
         "HANGTAG LABEL",
@@ -442,6 +451,7 @@ def _build_ai_kv_table_from_fields(fields: Any) -> Dict[str, Any]:
         "description": "DESCRIPTION",
         "market_of_origin": "MARKET OF ORIGIN",
         "pvp": "PVP",
+        "composition_label_part_colors": "COMPOSITION LABEL / PART COLORS",
         "compositions_information": "COMPOSITIONS INFORMATION",
         "care_instructions": "CARE INSTRUCTIONS",
         "hangtag_label": "HANGTAG LABEL",
@@ -1022,6 +1032,64 @@ def _table_add_rows_matrix(tbl: Any) -> Any:
     return tbl
 
 
+def _dedup_top_level_ai_kv_tables(tables: Any) -> Any:
+    if not isinstance(tables, list) or not tables:
+        return tables
+
+    def _is_ai_kv(t: Any) -> bool:
+        return isinstance(t, dict) and t.get("headers") == ["key", "value"]
+
+    # pick the most complete AI table across pages; keep other non-AI tables untouched
+    bad_value_norm = {
+        "date",
+        "ordernr",
+        "orderno",
+        "order",
+        "supplier",
+        "season",
+        "buyer",
+        "paymentterms",
+        "purchaser",
+        "sendto",
+        "shipto",
+        "taxofficenumber",
+    }
+
+    def _score_ai_kv(t: Dict[str, Any]) -> int:
+        rows_matrix = t.get("rows_matrix")
+        if not isinstance(rows_matrix, list):
+            return 0
+        score = 0
+        for r in rows_matrix:
+            if not isinstance(r, list) or len(r) < 2:
+                continue
+            v = str(r[1] or "").strip()
+            if not v:
+                continue
+            vn = re.sub(r"[^a-z0-9]+", "", v.lower())
+            if vn in bad_value_norm:
+                continue
+            score += 1
+        return score
+
+    ai_tables: List[Tuple[int, int, Dict[str, Any]]] = []
+    non_ai: List[Dict[str, Any]] = []
+    for i, t in enumerate(tables):
+        if _is_ai_kv(t):
+            ai_tables.append((_score_ai_kv(t), i, t))
+        else:
+            if isinstance(t, dict):
+                non_ai.append(t)
+
+    if not ai_tables:
+        return tables
+
+    # Higher score first; if tie, prefer earlier table (usually page 1)
+    ai_tables.sort(key=lambda x: (-x[0], x[1]))
+    best = ai_tables[0][2]
+    return [best] + non_ai
+
+
 def _reconstruct_table_from_boxes(boxes: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if len(boxes) < 6:
         return None
@@ -1458,7 +1526,45 @@ def _extract_fields_from_text(text: str) -> Dict[str, Any]:
     fields["send_to"] = _first(r"\b(send\s*to|kirim\s*ke|ship\s*to)\b\s*[:\-]?\s*(.+)")
     fields["tax_office_number"] = _first(r"\btax\s*office\s*number\b\s*[:\-]?\s*([0-9]{8,})")
 
+    # Composition header (garment docs)
+    # Example: "COMPOSITION LABEL / PART COLORS 800-BLACK"
+    fields["composition_label_part_colors"] = _first(
+        r"\bcomposition\s*label\s*/\s*part\s*colou?rs\b\s*[:\-]?\s*([^\n]+)"
+    )
+    # If OCR splits label and value across lines, try to capture next line
+    if not fields.get("composition_label_part_colors") and isinstance(text, str) and text.strip():
+        lines = [ln.strip() for ln in text.replace("\r", "\n").split("\n") if ln.strip()]
+        for i, ln in enumerate(lines):
+            if re.search(r"\bcomposition\s*label\b", ln, flags=re.IGNORECASE) and re.search(
+                r"\bpart\s*colou?rs\b", ln, flags=re.IGNORECASE
+            ):
+                # Try to read value from same line tail first
+                m = re.search(
+                    r"\bpart\s*colou?rs\b\s*[:\-]?\s*([A-Z0-9\-\s]+)",
+                    ln,
+                    flags=re.IGNORECASE,
+                )
+                if m and (m.group(1) or "").strip():
+                    fields["composition_label_part_colors"] = (m.group(1) or "").strip()
+                    break
+                # Otherwise take next line as value (e.g., "800-BLACK")
+                if i + 1 < len(lines):
+                    nxt = lines[i + 1]
+                    # accept formats like "800-BLACK" or "800 - BLACK"
+                    m2 = re.search(r"\b(\d{2,5}\s*[-/]\s*[A-Z]{2,})\b", nxt.replace(" ", ""), flags=re.IGNORECASE)
+                    if m2:
+                        fields["composition_label_part_colors"] = m2.group(1).replace(" ", "").strip()
+                    else:
+                        fields["composition_label_part_colors"] = nxt.strip()
+                    break
+
     cleaned = {k: v for k, v in fields.items() if v is not None}
+    # Normalize composition value to a short token if possible (e.g. 800-BLACK)
+    if isinstance(cleaned.get("composition_label_part_colors"), str):
+        cc = cleaned.get("composition_label_part_colors") or ""
+        mcc = re.search(r"\b\d{2,5}\s*[-/]\s*[A-Z]{2,}\b", cc, flags=re.IGNORECASE)
+        if mcc:
+            cleaned["composition_label_part_colors"] = mcc.group(0).replace(" ", "").strip()
     # Backward-compatible alias: some clients expect order_nr
     if "order_no" in cleaned and "order_nr" not in cleaned:
         cleaned["order_nr"] = cleaned.get("order_no")
@@ -2297,6 +2403,28 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
         if pt2 and pt2 != pt:
             merged["payment_terms"] = pt2
 
+    # Ensure composition label is present when detected in OCR text
+    if "composition_label_part_colors" not in merged and isinstance(text, str) and text.strip():
+        m = re.search(
+            r"\bcomposition\s*label\s*/\s*part\s*colou?rs\b\s*[:\-]?\s*([A-Z0-9\-\s]+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        v = (m.group(1) if m else "")
+        v = (v or "").strip()
+        if v:
+            merged["composition_label_part_colors"] = v
+        else:
+            # Multi-line fallback: find line with label then take next non-empty line
+            lines = [ln.strip() for ln in text.replace("\r", "\n").split("\n") if ln.strip()]
+            for i, ln in enumerate(lines):
+                if re.search(r"\bcomposition\s*label\b", ln, flags=re.IGNORECASE) and re.search(
+                    r"\bpart\s*colou?rs\b", ln, flags=re.IGNORECASE
+                ):
+                    if i + 1 < len(lines):
+                        merged["composition_label_part_colors"] = lines[i + 1].strip()
+                    break
+
     # Backward-compatible alias: clients may use order_nr
     if "order_no" in merged and "order_nr" not in merged:
         merged["order_nr"] = merged.get("order_no")
@@ -2437,6 +2565,10 @@ def health() -> Dict[str, Any]:
 
 
 def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
+    t0 = time.perf_counter()
+    request_id = str(payload.get("request_id") or "").strip() or str(uuid.uuid4())
+    warnings: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
     filename = str(payload.get("filename") or "uploaded")
     engine = payload.get("engine") or "tesseract"
     preprocess = bool(payload.get("preprocess", True))
@@ -2458,6 +2590,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         pages_text = _pdf_text_pages(file_bytes)
         joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
         if joined and len(joined) >= 50:
+            t_pdf = time.perf_counter()
             all_pages: List[Dict[str, Any]] = []
             combined_texts: List[str] = []
             for i, t in enumerate(pages_text or [], start=1):
@@ -2475,6 +2608,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                 try:
                     page_res["tables"] = [_build_ai_kv_table_from_fields(pp_fields)]
                 except Exception:
+                    warnings.append({"page": i, "code": "AI_TABLE_BUILD_FAILED", "message": "Failed to build AI key/value table"})
                     page_res["tables"] = []
                 all_pages.append(page_res)
                 if pp_text.strip():
@@ -2491,7 +2625,30 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                     if isinstance(pair, dict) and pair.get("key") is not None and pair.get("value") is not None:
                         combined_field_pairs.append({"page": p.get("page"), **pair})
 
+            dt = time.perf_counter() - t0
+            logger.info(
+                "ocr_extract_sync_done",
+                extra={
+                    "request_id": request_id,
+                    "filename": filename,
+                    "engine": "pdfplumber",
+                    "page_count": len(all_pages),
+                    "duration_sec": round(dt, 4),
+                    "pdf_text_sec": round(time.perf_counter() - t_pdf, 4),
+                },
+            )
             return {
+                "schema_version": "1.0",
+                "document_meta": {
+                    "request_id": request_id,
+                    "filename": filename,
+                    "engine": "pdfplumber",
+                    "preprocess": {"enabled": False, "mode": None, "target": "pdf_text"},
+                    "page_count": len(all_pages),
+                    "timings": {"total_sec": round(dt, 4)},
+                },
+                "warnings": warnings,
+                "errors": errors,
                 "filename": filename,
                 "engine": "pdfplumber",
                 "pages": all_pages,
@@ -2506,6 +2663,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     all_pages: List[Dict[str, Any]] = []
     combined_texts: List[str] = []
     for page_idx, img_bgr in enumerate(images_bgr, start=1):
+        t_page0 = time.perf_counter()
         prep_meta: Dict[str, Any] = {"enabled": preprocess}
 
         if preprocess:
@@ -2568,6 +2726,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                 ai_tbl = _build_ai_kv_table_from_fields(page_res.get("fields"))
                 page_res["tables"] = [ai_tbl] + (page_res.get("tables") or [])
         except Exception:
+            warnings.append({"page": page_idx, "code": "AI_TABLE_BUILD_FAILED", "message": "Failed to build AI key/value table"})
             pass
 
         # Inject text-derived fields into AI key/value tables when table-based extraction missed them
@@ -2683,7 +2842,14 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     combined_tables: List[Dict[str, Any]] = []
     for p in all_pages:
         for t in (p.get("tables") or []):
-            combined_tables.append({"page": p.get("page"), **t})
+            tt = {"page": p.get("page"), **t}
+            try:
+                tt = _table_add_rows_matrix(tt)
+            except Exception:
+                pass
+            combined_tables.append(tt)
+
+    combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
 
     combined_fields: List[Dict[str, Any]] = []
     for p in all_pages:
@@ -2696,7 +2862,31 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(pair, dict) and pair.get("key") is not None and pair.get("value") is not None:
                 combined_field_pairs.append({"page": p.get("page"), **pair})
 
+    dt = time.perf_counter() - t0
+    logger.info(
+        "ocr_extract_sync_done",
+        extra={
+            "request_id": request_id,
+            "filename": filename,
+            "engine": engine,
+            "page_count": len(all_pages),
+            "duration_sec": round(dt, 4),
+            "warnings": len(warnings),
+            "errors": len(errors),
+        },
+    )
     return {
+        "schema_version": "1.0",
+        "document_meta": {
+            "request_id": request_id,
+            "filename": filename,
+            "engine": engine,
+            "preprocess": {"enabled": preprocess, "mode": preprocess_mode},
+            "page_count": len(all_pages),
+            "timings": {"total_sec": round(dt, 4)},
+        },
+        "warnings": warnings,
+        "errors": errors,
         "filename": filename,
         "engine": engine,
         "pages": all_pages,
@@ -2762,6 +2952,10 @@ async def ocr_extract(
     preprocess: bool = Query(True),
     preprocess_mode: _PREPROCESS_MODE = Query("basic"),
 ) -> JSONResponse:
+    t0 = time.perf_counter()
+    request_id = request.headers.get("x-request-id") or request.headers.get("x-correlation-id") or str(uuid.uuid4())
+    warnings: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
     content_type = request.headers.get("content-type")
 
     if file is not None:
@@ -2799,6 +2993,11 @@ async def ocr_extract(
                     "field_pairs": _fields_to_pairs(pp_fields),
                     "preprocess": {"enabled": False, "target": "pdf_text"},
                 }
+                try:
+                    page_res["tables"] = [_build_ai_kv_table_from_fields(pp_fields)]
+                except Exception:
+                    warnings.append({"page": i, "code": "AI_TABLE_BUILD_FAILED", "message": "Failed to build AI key/value table"})
+                    page_res["tables"] = []
                 all_pages.append(page_res)
                 if pp_text.strip():
                     combined_texts.append(pp_text.strip())
@@ -2814,13 +3013,50 @@ async def ocr_extract(
                     if isinstance(pair, dict) and pair.get("key") is not None and pair.get("value") is not None:
                         combined_field_pairs.append({"page": p.get("page"), **pair})
 
+            combined_tables: List[Dict[str, Any]] = []
+            for p in all_pages:
+                for t in (p.get("tables") or []):
+                    tt = {"page": p.get("page"), **t}
+                    try:
+                        tt = _table_add_rows_matrix(tt)
+                    except Exception:
+                        pass
+                    combined_tables.append(tt)
+
+            combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
+
+            dt = time.perf_counter() - t0
+            logger.info(
+                "ocr_extract_done",
+                extra={
+                    "request_id": request_id,
+                    "filename": filename,
+                    "engine": "pdfplumber",
+                    "page_count": len(all_pages),
+                    "duration_sec": round(dt, 4),
+                    "warnings": len(warnings),
+                    "errors": len(errors),
+                },
+            )
+
             return JSONResponse(
                 {
+                    "schema_version": "1.0",
+                    "document_meta": {
+                        "request_id": request_id,
+                        "filename": filename,
+                        "engine": "pdfplumber",
+                        "preprocess": {"enabled": False, "mode": None, "target": "pdf_text"},
+                        "page_count": len(all_pages),
+                        "timings": {"total_sec": round(dt, 4)},
+                    },
+                    "warnings": warnings,
+                    "errors": errors,
                     "filename": filename,
                     "engine": "pdfplumber",
                     "pages": all_pages,
                     "text": "\n\n".join(combined_texts).strip(),
-                    "tables": [{"page": p.get("page"), **t} for p in all_pages for t in (p.get("tables") or [])],
+                    "tables": combined_tables,
                     "fields": combined_fields,
                     "field_pairs": combined_field_pairs,
                 }
@@ -2844,6 +3080,7 @@ async def ocr_extract(
     combined_texts: List[str] = []
 
     for page_idx, img_bgr in enumerate(images_bgr, start=1):
+        t_page0 = time.perf_counter()
         prep_meta: Dict[str, Any] = {"enabled": preprocess}
         input_for_ocr: np.ndarray
 
@@ -2917,7 +3154,9 @@ async def ocr_extract(
                     ai_tbl = _build_ai_kv_table_from_fields(page_res.get("fields"))
                     page_res["tables"] = [ai_tbl] + (page_res.get("tables") or [])
             except Exception:
-                pass
+                warnings.append({"page": page_idx, "code": "AI_TABLE_BUILD_FAILED", "message": "Failed to build AI key/value table"})
+
+            page_res["timings"] = {"total_sec": round(time.perf_counter() - t_page0, 4)}
 
             page_res["field_pairs"] = _fields_to_pairs(page_res.get("fields"))
 
@@ -2929,7 +3168,14 @@ async def ocr_extract(
     combined_tables: List[Dict[str, Any]] = []
     for p in all_pages:
         for t in (p.get("tables") or []):
-            combined_tables.append({"page": p.get("page"), **t})
+            tt = {"page": p.get("page"), **t}
+            try:
+                tt = _table_add_rows_matrix(tt)
+            except Exception:
+                pass
+            combined_tables.append(tt)
+
+    combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
 
     combined_fields: List[Dict[str, Any]] = []
     for p in all_pages:
@@ -2942,8 +3188,33 @@ async def ocr_extract(
             if isinstance(pair, dict) and pair.get("key") is not None and pair.get("value") is not None:
                 combined_field_pairs.append({"page": p.get("page"), **pair})
 
+    dt = time.perf_counter() - t0
+    logger.info(
+        "ocr_extract_done",
+        extra={
+            "request_id": request_id,
+            "filename": filename,
+            "engine": engine,
+            "page_count": len(all_pages),
+            "duration_sec": round(dt, 4),
+            "warnings": len(warnings),
+            "errors": len(errors),
+        },
+    )
+
     return JSONResponse(
         {
+            "schema_version": "1.0",
+            "document_meta": {
+                "request_id": request_id,
+                "filename": filename,
+                "engine": engine,
+                "preprocess": {"enabled": preprocess, "mode": preprocess_mode},
+                "page_count": len(all_pages),
+                "timings": {"total_sec": round(dt, 4)},
+            },
+            "warnings": warnings,
+            "errors": errors,
             "filename": filename,
             "engine": engine,
             "pages": all_pages,
