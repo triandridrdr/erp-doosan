@@ -404,6 +404,81 @@ def _fields_to_pairs(fields: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _build_ai_kv_table_from_fields(fields: Any) -> Dict[str, Any]:
+    canonical_keys = [
+        "ORDER-NR",
+        "DATE",
+        "SEASON",
+        "BUYER",
+        "PURCHASER",
+        "SUPPLIER",
+        "SEND TO",
+        "PAYMENT TERMS",
+        "SUPPLIER REF",
+        "ARTICLE",
+        "DESCRIPTION",
+        "MARKET OF ORIGIN",
+        "PVP",
+        "COMPOSITIONS INFORMATION",
+        "CARE INSTRUCTIONS",
+        "HANGTAG LABEL",
+        "MAIN LABEL",
+        "EXTERNAL FABRIC",
+        "HANGING",
+        "TOTAL ORDER",
+    ]
+
+    field_to_key = {
+        "order_no": "ORDER-NR",
+        "date": "DATE",
+        "season": "SEASON",
+        "buyer": "BUYER",
+        "purchaser": "PURCHASER",
+        "supplier": "SUPPLIER",
+        "send_to": "SEND TO",
+        "payment_terms": "PAYMENT TERMS",
+        "supplier_ref": "SUPPLIER REF",
+        "article": "ARTICLE",
+        "description": "DESCRIPTION",
+        "market_of_origin": "MARKET OF ORIGIN",
+        "pvp": "PVP",
+        "compositions_information": "COMPOSITIONS INFORMATION",
+        "care_instructions": "CARE INSTRUCTIONS",
+        "hangtag_label": "HANGTAG LABEL",
+        "main_label": "MAIN LABEL",
+        "external_fabric": "EXTERNAL FABRIC",
+        "hanging": "HANGING",
+        "total_order": "TOTAL ORDER",
+    }
+
+    values: Dict[str, str] = {}
+    if isinstance(fields, dict):
+        for fk, kk in field_to_key.items():
+            v = fields.get(fk)
+            if isinstance(v, str) and v.strip():
+                values[str(kk).strip().upper()] = v.strip()
+
+    # guardrails for frequently polluted keys
+    try:
+        v = (values.get("SUPPLIER REF") or "").strip()
+        if v:
+            vv = v.replace(" ", "").upper()
+            if re.fullmatch(r"\d{2,4}\-?[A-Z]{2,}", vv):
+                values["SUPPLIER REF"] = ""
+            if re.search(r"\b(TOTAL|OUTER\s+SHELL|LINING|COMPOSITION|COMPOSITIONS|CARE|INSTRUCTIONS)\b", v, flags=re.IGNORECASE):
+                values["SUPPLIER REF"] = ""
+    except Exception:
+        pass
+
+    kv_pairs_all = [{"key": k, "value": values.get(k, "")} for k in canonical_keys]
+    return {
+        "headers": ["key", "value"],
+        "rows": [{"key": p.get("key"), "value": p.get("value")} for p in kv_pairs_all],
+        "rows_matrix": [[str(p.get("key") or ""), str(p.get("value") or "")] for p in kv_pairs_all],
+        "kv_pairs_all": kv_pairs_all,
+    }
+
+
 def _table_add_rows_matrix(tbl: Any) -> Any:
     if not isinstance(tbl, dict):
         return tbl
@@ -584,6 +659,102 @@ def _table_add_rows_matrix(tbl: Any) -> Any:
             elif lb is not None and la is None and a and not _value_contains_label(a):
                 kv_pairs.append({"key": lb, "value": a})
 
+    # 2.5) Item header mapping: SUPPLIER REF | ARTICLE | DESCRIPTION | MARKET OF ORIGIN | PVP then values below
+    # This is common in garment SO/PO and is more reliable than generic vertical capture.
+    # Robust to merged/colspan tables by using index ranges between labels.
+    try:
+        item_keys = {"SUPPLIER REF", "ARTICLE", "DESCRIPTION", "MARKET OF ORIGIN", "PVP"}
+        header_row_idx: Optional[int] = None
+        header_cols: List[Tuple[int, str]] = []
+
+        for r in range(0, len(rows_matrix)):
+            row = rows_matrix[r]
+            if not isinstance(row, list) or not row:
+                continue
+            found_cols: List[Tuple[int, str]] = []
+            for c, cell in enumerate(row):
+                if not isinstance(cell, str):
+                    continue
+                k = _looks_like_label(cell)
+                if k is not None and k in item_keys:
+                    found_cols.append((c, k))
+            found_keys = {k for _, k in found_cols}
+            if len(found_keys) >= 3 and ("ARTICLE" in found_keys or "DESCRIPTION" in found_keys):
+                header_row_idx = r
+                header_cols = sorted(found_cols, key=lambda x: x[0])
+                break
+
+        def _row_has_any_label(row_any: List[Any]) -> bool:
+            for vv in row_any:
+                if not isinstance(vv, str):
+                    continue
+                if _looks_like_label((vv or "").strip()) is not None:
+                    return True
+            return False
+
+        if header_row_idx is not None and header_cols:
+            # Build index ranges per key: [col_i, col_{i+1})
+            ranges: List[Tuple[str, int, int]] = []
+            for i, (c, k) in enumerate(header_cols):
+                start = c
+                end = header_cols[i + 1][0] if i + 1 < len(header_cols) else 10_000
+                ranges.append((k, start, end))
+
+            def _reject_supplier_ref(v: str) -> bool:
+                # SUPPLIER REF is often blank in the document; don't accidentally take values from the composition/care sections.
+                if not v:
+                    return True
+                if re.search(r"\b(OUTER\s+SHELL|LINING|HANGTAG|LABEL|COLOUR|COLOR|COMPOSITION|COMPOSITIONS|CARE\s+INSTRUCTIONS|INSTRUCTIONS)\b", v, flags=re.IGNORECASE) is not None:
+                    return True
+                # Weighted color / color code patterns (e.g. "660-WINE") are not supplier refs
+                if re.fullmatch(r"\d{2,4}\s*\-\s*[A-Z]{2,}", v.replace(" ", "").upper()):
+                    return True
+                return False
+
+            pvp_parts: List[str] = []
+            max_rows_scan = 10
+            for rr in range(header_row_idx + 1, min(len(rows_matrix), header_row_idx + 1 + max_rows_scan)):
+                next_row = rows_matrix[rr]
+                if not isinstance(next_row, list):
+                    break
+                # Stop if we hit another labels row
+                if _row_has_any_label(next_row):
+                    break
+
+                for key, start, end in ranges:
+                    # already filled (except PVP multi-line)
+                    if key != "PVP" and any(p.get("key") == key for p in kv_pairs):
+                        continue
+
+                    picked: Optional[str] = None
+                    for cc in range(start, min(end, len(next_row))):
+                        v = next_row[cc]
+                        if not isinstance(v, str):
+                            continue
+                        v = (v or "").strip()
+                        if not v:
+                            continue
+                        if _value_contains_label(v):
+                            continue
+                        if key == "SUPPLIER REF" and _reject_supplier_ref(v):
+                            continue
+                        picked = v
+                        break
+
+                    if not picked:
+                        continue
+
+                    if key == "PVP":
+                        if re.search(r"\b(EUR|USD|GBP)\b", picked, flags=re.IGNORECASE) or re.search(r"\b\d+[\.,]\d{2}\b", picked):
+                            pvp_parts.append(picked)
+                    else:
+                        kv_pairs.append({"key": key, "value": picked})
+
+            if pvp_parts:
+                kv_pairs.append({"key": "PVP", "value": " ".join(pvp_parts).strip()})
+    except Exception:
+        pass
+
     # 3) Vertical same-column pairing: header label on row r, value(s) below on row r+1.. (common in SO/PO)
     try:
         max_follow_rows = 6
@@ -761,6 +932,8 @@ def _table_add_rows_matrix(tbl: Any) -> Any:
                 score += 10.0
             if re.search(r"\b(OUTER\s+SHELL|LINING|HANGTAG|LABEL|COLOUR|COLOR)\b", v2, flags=re.IGNORECASE):
                 score -= 40.0
+            if re.fullmatch(r"\d{2,4}\-?[A-Z]{2,}", v2.replace(" ", "").upper()):
+                score -= 50.0
         return score
 
     grouped_best: Dict[str, str] = {}
@@ -774,6 +947,11 @@ def _table_add_rows_matrix(tbl: Any) -> Any:
         if k not in grouped_score or s > grouped_score[k]:
             grouped_score[k] = s
             grouped_best[k] = v
+
+    # Drop low-confidence candidates to avoid filling blanks with unrelated section text
+    if "SUPPLIER REF" in grouped_best and grouped_score.get("SUPPLIER REF", 0.0) < 15.0:
+        grouped_best.pop("SUPPLIER REF", None)
+        grouped_score.pop("SUPPLIER REF", None)
 
     tbl["kv_pairs_grouped"] = [{"key": k, "value": v} for k, v in grouped_best.items()]
 
@@ -802,7 +980,24 @@ def _table_add_rows_matrix(tbl: Any) -> Any:
     ]
 
     grouped_best_u = {str(k or "").strip().upper(): str(v or "").strip() for k, v in grouped_best.items()}
-    tbl["kv_pairs_all"] = [{"key": k, "value": grouped_best_u.get(k, "")} for k in canonical_keys]
+    kv_all = [{"key": k, "value": grouped_best_u.get(k, "")} for k in canonical_keys]
+    # Final guardrails for keys that are frequently blank in the document but get polluted by nearby sections
+    try:
+        for p in kv_all:
+            if not isinstance(p, dict):
+                continue
+            k = str(p.get("key") or "").strip().upper()
+            v = str(p.get("value") or "").strip()
+            if k == "SUPPLIER REF" and v:
+                vv = v.replace(" ", "").upper()
+                if re.fullmatch(r"\d{2,4}\-?[A-Z]{2,}", vv):
+                    p["value"] = ""
+                    continue
+                if re.search(r"\b(OUTER\s+SHELL|LINING|HANGTAG|LABEL|COLOUR|COLOR|COMPOSITION|COMPOSITIONS|CARE\s+INSTRUCTIONS|INSTRUCTIONS)\b", v, flags=re.IGNORECASE):
+                    p["value"] = ""
+    except Exception:
+        pass
+    tbl["kv_pairs_all"] = kv_all
 
     try:
         generic_headers = False
@@ -1316,6 +1511,462 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
 
     merged = {**t_fields, **{k: v for k, v in tbl_fields.items() if v is not None}}
 
+    def _field_bad(field: str, val: Any) -> bool:
+        s = (str(val) if val is not None else "").strip()
+        if not s:
+            return True
+        # Frequently swapped: a label token is used as a value
+        if _norm_key(s) in {
+            "date",
+            "ordernr",
+            "order",
+            "supplier",
+            "season",
+            "buyer",
+            "paymentterms",
+            "purchaser",
+            "sendto",
+            "shipto",
+            "taxofficenumber",
+            "description",
+            "article",
+            "marketoforigin",
+            "pvp",
+        }:
+            return True
+        if re.search(r"\b(TOTAL|DRIGIN|MARKETOF)\b", s, flags=re.IGNORECASE):
+            return True
+        if field in {"supplier_ref"}:
+            if re.search(r"\b(OUTER\s+SHELL|LINING|COMPOSITION|COMPOSITIONS|CARE|INSTRUCTIONS|TOTAL)\b", s, flags=re.IGNORECASE):
+                return True
+            if re.fullmatch(r"\d{2,4}\-?[A-Z]{2,}", s.replace(" ", "").upper()):
+                return True
+        if field in {"order_no"}:
+            if re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", s):
+                return True
+            if not re.search(r"\b[A-Z0-9]{2,}[\-/][A-Z0-9]{1,}\b", s.replace(" ", "").upper()):
+                return True
+        if field in {"date"}:
+            if re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", s) is None:
+                return True
+        if field in {"buyer"}:
+            # In garment SO/PO buyer is usually a short code/number
+            if not re.fullmatch(r"[A-Z0-9]{1,8}", s.replace(" ", "").upper()):
+                return True
+        if field in {"season"}:
+            if not re.search(r"\b[WS]\b", s, flags=re.IGNORECASE) and not re.search(r"\b\d{4}\b", s):
+                return True
+        if field in {"pvp"}:
+            if not (re.search(r"\b(EUR|USD|GBP)\b", s, flags=re.IGNORECASE) and re.search(r"\b\d+[\.,]\d{2}\b", s)):
+                return True
+        if field in {"market_of_origin"}:
+            if not re.search(r"\b[A-Z]{3,}\b", s):
+                return True
+        if field in {"description"}:
+            if re.search(r"\b(EUR|USD|GBP)\b", s, flags=re.IGNORECASE):
+                return True
+        return False
+
+    # Garment SO/PO: anchor-based parsing from raw OCR text to handle mixed layouts (left->right and top->bottom)
+    try:
+        def _norm_line(s: str) -> str:
+            return " ".join((s or "").strip().split())
+
+        raw_lines = [_norm_line(ln) for ln in (text or "").replace("\r", "\n").split("\n")]
+        lines2 = [ln for ln in raw_lines if ln]
+
+        def _find_idx(pred) -> Optional[int]:
+            for ii, ln in enumerate(lines2):
+                if pred(ln):
+                    return ii
+            return None
+
+        def _collect_until(start_idx: int, stop_pred, max_lines: int) -> str:
+            parts: List[str] = []
+            for ii in range(start_idx, min(len(lines2), start_idx + max_lines)):
+                ln = lines2[ii]
+                if stop_pred(ln):
+                    break
+                parts.append(ln)
+            return " ".join([p for p in parts if p]).strip()
+
+        # PURCHASER block: PURCHASER then company lines until SEND TO
+        if _field_bad("purchaser", merged.get("purchaser")):
+            i_p = _find_idx(lambda s: _norm_key(s) in {"purchaser", "purchaser:"} or s.upper() == "PURCHASER")
+            i_s = _find_idx(lambda s: "send" in _norm_key(s) and ("to" in _norm_key(s) or _norm_key(s) in {"sendto"}))
+            if i_p is not None:
+                end_idx = i_s if (i_s is not None and i_s > i_p) else None
+                parts = []
+                for ii in range(i_p + 1, min(len(lines2), (end_idx if end_idx is not None else i_p + 6))):
+                    if end_idx is not None and ii >= end_idx:
+                        break
+                    if _norm_key(lines2[ii]) in {"sendto", "sendto:", "sendto-", "sendto."}:
+                        break
+                    parts.append(lines2[ii])
+                v = " ".join([p for p in parts if p]).strip()
+                if v:
+                    merged["purchaser"] = v
+
+        # SEND TO address: SEND TO then lines until Tax office number / ORDER-NR / DATE
+        if _field_bad("send_to", merged.get("send_to")):
+            i_st = _find_idx(lambda s: ("send" in _norm_key(s) and ("to" in _norm_key(s) or _norm_key(s) in {"sendto"})) or ("ship" in _norm_key(s) and "to" in _norm_key(s)))
+            if i_st is not None:
+                def _stop_sendto(s: str) -> bool:
+                    nk = _norm_key(s)
+                    return nk.startswith("taxofficenumber") or nk in {"ordernr", "order", "date", "supplier", "season", "buyer", "paymentterms"} or "order" in nk and "nr" in nk
+
+                v = _collect_until(i_st + 1, _stop_sendto, 8)
+                if v:
+                    merged["send_to"] = v
+
+        # Item block (ARTICLE/DESCRIPTION/MARKET OF ORIGIN/PVP) from text anchors
+        # Use header line containing ARTICLE/DESCRIPTION/MARKET and then read subsequent lines until COMPOSITIONS/CARE
+        item_header_idx = _find_idx(lambda s: "article" in _norm_key(s) and "description" in _norm_key(s))
+        if item_header_idx is not None:
+            def _stop_item(s: str) -> bool:
+                nk = _norm_key(s)
+                return "compositions" in nk or "composition" in nk or nk.startswith("care") or "careinstructions" in nk
+
+            block = []
+            for ii in range(item_header_idx + 1, min(len(lines2), item_header_idx + 25)):
+                if _stop_item(lines2[ii]):
+                    break
+                block.append(lines2[ii])
+
+            def _is_price(s: str) -> bool:
+                return re.search(r"\b(EUR|USD|GBP)\b", s, flags=re.IGNORECASE) is not None and re.search(r"\b\d+[\.,]\d{2}\b", s) is not None
+
+            prices = [ln for ln in block if _is_price(ln)]
+            if prices and _field_bad("pvp", merged.get("pvp")):
+                merged["pvp"] = " ".join(prices).strip()
+
+            if _field_bad("article", merged.get("article")):
+                for ln in block:
+                    m = re.search(r"\b\d{3,5}\s*/\s*\d{1,4}\b", ln)
+                    if m:
+                        merged["article"] = m.group(0).replace(" ", "")
+                        break
+
+            if _field_bad("market_of_origin", merged.get("market_of_origin")):
+                for ln in block:
+                    if re.search(r"\bINDONESIA\b", ln, flags=re.IGNORECASE):
+                        merged["market_of_origin"] = "INDONESIA"
+                        break
+
+            if _field_bad("description", merged.get("description")):
+                for ln in block:
+                    if _is_price(ln):
+                        continue
+                    if re.search(r"\bINDONESIA\b", ln, flags=re.IGNORECASE):
+                        continue
+                    if re.search(r"\b\d{3,5}\s*/\s*\d{1,4}\b", ln):
+                        continue
+                    # avoid common noise tokens
+                    if re.search(r"\b(DRIGIN|ORIGIN|MARKETOF)\b", ln, flags=re.IGNORECASE):
+                        continue
+                    if len(ln) >= 6:
+                        merged["description"] = ln
+                        break
+    except Exception:
+        pass
+
+    # Garment SO/PO: state-machine parsing from raw text labels/values (handles stacked labels then stacked values)
+    try:
+        def _nk(s: str) -> str:
+            return _norm_key(s)
+
+        raw_lines = [_norm_line(ln) for ln in (text or "").replace("\r", "\n").split("\n")]
+        seq = [ln for ln in raw_lines if ln]
+
+        # Canonical label -> field key
+        label_defs: Dict[str, Dict[str, Any]] = {
+            "PURCHASER": {"field": "purchaser", "aliases": {"purchaser", "purchaser:"}},
+            "SEND TO": {"field": "send_to", "aliases": {"sendto", "sendto:", "sendt0", "sendto-", "send to", "shipto", "ship to", "kirim ke"}},
+            "TAX OFFICE NUMBER": {"field": "tax_office_number", "aliases": {"taxofficenumber", "tax office number", "taxofficenumber:"}},
+            "ORDER-NR": {"field": "order_no", "aliases": {"ordernr", "order nr", "order-no", "order no", "order number", "sales order", "no so", "nomor so"}},
+            "DATE": {"field": "date", "aliases": {"date", "tanggal", "tgl"}},
+            "SUPPLIER": {"field": "supplier", "aliases": {"supplier", "vendor", "pemasok"}},
+            "SEASON": {"field": "season", "aliases": {"season"}},
+            "BUYER": {"field": "buyer", "aliases": {"buyer", "pembeli"}},
+            "PAYMENT TERMS": {"field": "payment_terms", "aliases": {"paymentterms", "payment terms", "termsofpayment", "syaratpembayaran"}},
+            "SUPPLIER REF": {"field": "supplier_ref", "aliases": {"supplierref", "supplier ref", "supplierref:"}},
+            "ARTICLE": {"field": "article", "aliases": {"article", "articie", "artlcle"}},
+            "DESCRIPTION": {"field": "description", "aliases": {"description", "descripton", "descriplion"}},
+            "MARKET OF ORIGIN": {"field": "market_of_origin", "aliases": {"marketof", "marketoforigin", "market origin", "marketofor", "origin"}},
+            "PVP": {"field": "pvp", "aliases": {"pvp"}},
+            "COMPOSITIONS INFORMATION": {"field": "_stop", "aliases": {"compositionsineormation", "compositionsinformation", "compositioninformation", "compotitionsinformation", "compositionweightedcolors"}},
+            "CARE INSTRUCTIONS": {"field": "_stop", "aliases": {"careinstructions", "careinstruction", "care introtion"}},
+        }
+
+        long_fields = {"purchaser", "send_to"}
+
+        def _match_label(line: str) -> Optional[str]:
+            n = _nk(line)
+            if not n:
+                return None
+            # Special-case: send to (OCR missing spaces)
+            if ("send" in n and ("to" in n or n.endswith("t0"))) or n in {"sendto", "shipto"}:
+                return "SEND TO"
+            for canon, spec in label_defs.items():
+                for a in spec.get("aliases") or set():
+                    if n == _nk(str(a)):
+                        return canon
+            # fuzzy fallback
+            if fuzz is not None:
+                best = 0.0
+                best_key = None
+                for canon, spec in label_defs.items():
+                    for a in spec.get("aliases") or set():
+                        na = _nk(str(a))
+                        if not na:
+                            continue
+                        score = float(fuzz.ratio(n, na))
+                        if score > best:
+                            best = score
+                            best_key = canon
+                if best_key is not None and best >= 85.0:
+                    return best_key
+            return None
+
+        def _is_price_line(s: str) -> bool:
+            return re.search(r"\b\d+[\.,]\d{2}\b", s) is not None and re.search(r"\b(EUR|USD|GBP)\b", s, flags=re.IGNORECASE) is not None
+
+        def _is_article_line(s: str) -> bool:
+            return re.search(r"\b\d{3,5}\s*/\s*\d{1,4}\b", s) is not None
+
+        # Pass 1: detect blocks for long fields (PURCHASER, SEND TO)
+        i = 0
+        while i < len(seq):
+            canon = _match_label(seq[i])
+            if canon is None:
+                i += 1
+                continue
+            field = label_defs.get(canon, {}).get("field")
+            if field in long_fields:
+                parts: List[str] = []
+                j = i + 1
+                while j < len(seq) and len(parts) < 8:
+                    nxt = seq[j]
+                    nxt_label = _match_label(nxt)
+                    if nxt_label is not None and nxt_label != canon:
+                        break
+                    # stop at strong anchors
+                    if _nk(nxt).startswith("taxofficenumber"):
+                        break
+                    parts.append(nxt)
+                    j += 1
+                v = " ".join([p for p in parts if p]).strip()
+                if v and _field_bad(str(field), merged.get(field)):
+                    merged[str(field)] = v
+                i = j
+                continue
+            i += 1
+
+        # Pass 2: stacked labels -> stacked values mapping
+        pending: List[str] = []
+        pending_fields: List[str] = []
+        for ln in seq:
+            canon = _match_label(ln)
+            if canon is not None:
+                f = label_defs.get(canon, {}).get("field")
+                if f == "_stop":
+                    pending.clear()
+                    pending_fields.clear()
+                    continue
+                if f in long_fields:
+                    pending.clear()
+                    pending_fields.clear()
+                    continue
+                pending.append(canon)
+                pending_fields.append(str(f))
+                continue
+
+            # Value line
+            if not pending_fields:
+                continue
+            f = pending_fields.pop(0)
+            pending.pop(0)
+            v = ln.strip()
+            if not v:
+                continue
+            # Normalize by field
+            if f == "order_no":
+                m = re.search(r"([A-Z0-9\-\/]+)", v, flags=re.IGNORECASE)
+                v = (m.group(1) if m else v).strip()
+            elif f == "date":
+                m = re.search(r"([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})", v)
+                v = (m.group(1) if m else v).strip()
+            elif f == "article":
+                m = re.search(r"(\d{3,5}\s*/\s*\d{1,4})", v)
+                v = (m.group(1) if m else v).replace(" ", "")
+            elif f == "market_of_origin":
+                if re.search(r"\bINDONESIA\b", v, flags=re.IGNORECASE):
+                    v = "INDONESIA"
+            elif f == "pvp":
+                # pvp may be multiple price lines; keep the first here (additional price lines parsed below)
+                if not _is_price_line(v):
+                    continue
+            if v and (_field_bad(str(f), merged.get(f)) or f not in merged):
+                merged[f] = v
+
+        # Pass 3: item block enrichment (description/origin/prices) between ARTICLE/DESCRIPTION headers and COMPOSITIONS
+        if any(_match_label(ln) == "ARTICLE" for ln in seq):
+            # collect region from first ARTICLE label until compositions/care
+            start_idx = None
+            for idx, ln in enumerate(seq):
+                if _match_label(ln) == "ARTICLE":
+                    start_idx = idx
+                    break
+            if start_idx is not None:
+                block: List[str] = []
+                for ln in seq[start_idx + 1 : start_idx + 35]:
+                    canon = _match_label(ln)
+                    if canon in {"COMPOSITIONS INFORMATION", "CARE INSTRUCTIONS"}:
+                        break
+                    if canon is not None:
+                        continue
+                    block.append(ln)
+
+                if _field_bad("article", merged.get("article")):
+                    for ln in block:
+                        if _is_article_line(ln):
+                            m = re.search(r"(\d{3,5}\s*/\s*\d{1,4})", ln)
+                            if m:
+                                merged["article"] = m.group(1).replace(" ", "")
+                                break
+
+                if _field_bad("market_of_origin", merged.get("market_of_origin")):
+                    for ln in block:
+                        if re.search(r"\bINDONESIA\b", ln, flags=re.IGNORECASE):
+                            merged["market_of_origin"] = "INDONESIA"
+                            break
+
+                if _field_bad("pvp", merged.get("pvp")):
+                    prices = [ln for ln in block if _is_price_line(ln)]
+                    if prices:
+                        merged["pvp"] = " ".join(prices).strip()
+
+                if _field_bad("description", merged.get("description")):
+                    for ln in block:
+                        if _is_price_line(ln) or _is_article_line(ln):
+                            continue
+                        if re.search(r"\bINDONESIA\b", ln, flags=re.IGNORECASE):
+                            continue
+                        if re.search(r"\b(DRIGIN|MARKETOF|ORIGIN)\b", ln, flags=re.IGNORECASE):
+                            continue
+                        if len(ln) >= 6:
+                            merged["description"] = ln
+                            break
+    except Exception:
+        pass
+
+    # Deterministic label -> value scan (repairs common swaps when OCR line order is unreliable)
+    try:
+        def _find_value_after(canon_label: str, validator, max_lookahead: int = 6) -> Optional[str]:
+            for idx, ln in enumerate(seq):
+                if _match_label(ln) != canon_label:
+                    continue
+                for j in range(idx + 1, min(len(seq), idx + 1 + max_lookahead)):
+                    v = (seq[j] or "").strip()
+                    if not v:
+                        continue
+                    if _match_label(v) is not None:
+                        continue
+                    if validator(v):
+                        return v
+            return None
+
+        def _is_order_no(v: str) -> bool:
+            vv = v.replace(" ", "").upper()
+            return re.search(r"\b[A-Z0-9]{2,}[\-/][A-Z0-9]{1,}\b", vv) is not None and re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", vv) is None
+
+        def _is_date(v: str) -> bool:
+            return re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", v) is not None
+
+        def _is_buyer(v: str) -> bool:
+            return re.fullmatch(r"[A-Z0-9]{1,8}", v.replace(" ", "").upper()) is not None
+
+        def _is_season(v: str) -> bool:
+            return re.search(r"\b[WS]\b", v, flags=re.IGNORECASE) is not None and re.search(r"\b\d{4}\b", v) is not None
+
+        def _is_payment_terms(v: str) -> bool:
+            return re.search(r"\bDAY\b", v, flags=re.IGNORECASE) is not None or re.search(r"\bDAYS\b", v, flags=re.IGNORECASE) is not None or re.search(r"\bTRANSF\b", v, flags=re.IGNORECASE) is not None
+
+        def _is_supplier(v: str) -> bool:
+            # prefer a supplier-like string (company) that is not just codes/dates
+            if _is_date(v) or _is_order_no(v):
+                return False
+            if len(v) < 6:
+                return False
+            return re.search(r"\b(CO\.?|LTD\.?|LIMITED|TRADING|COMPANY)\b", v, flags=re.IGNORECASE) is not None or re.search(r"\b[A-Z]{2,}\b", v) is not None
+
+        if _field_bad("order_no", merged.get("order_no")):
+            v = _find_value_after("ORDER-NR", _is_order_no)
+            if v:
+                m = re.search(r"\b([A-Z0-9\-/]+)\b", v.replace(" ", ""), flags=re.IGNORECASE)
+                merged["order_no"] = (m.group(1) if m else v).strip()
+
+        if _field_bad("date", merged.get("date")):
+            v = _find_value_after("DATE", _is_date)
+            if v:
+                m = re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", v)
+                merged["date"] = (m.group(1) if m else v).strip()
+
+        if _field_bad("season", merged.get("season")):
+            v = _find_value_after("SEASON", _is_season)
+            if v:
+                merged["season"] = v.strip()
+
+        if _field_bad("buyer", merged.get("buyer")):
+            v = _find_value_after("BUYER", _is_buyer)
+            if v:
+                merged["buyer"] = v.replace(" ", "").strip()
+
+        if _field_bad("payment_terms", merged.get("payment_terms")):
+            v = _find_value_after("PAYMENT TERMS", _is_payment_terms, max_lookahead=10)
+            if v:
+                merged["payment_terms"] = v.strip()
+
+        if _field_bad("supplier", merged.get("supplier")):
+            v = _find_value_after("SUPPLIER", _is_supplier, max_lookahead=10)
+            if v:
+                merged["supplier"] = v.strip()
+
+        # Purchaser / send_to: avoid capturing another label as the value
+        if _field_bad("purchaser", merged.get("purchaser")):
+            i_p = None
+            for ii, ln in enumerate(seq):
+                if _match_label(ln) == "PURCHASER":
+                    i_p = ii
+                    break
+            if i_p is not None:
+                parts: List[str] = []
+                for j in range(i_p + 1, min(len(seq), i_p + 10)):
+                    if _match_label(seq[j]) is not None:
+                        break
+                    parts.append(seq[j])
+                v = " ".join([p for p in parts if p]).strip()
+                if v:
+                    merged["purchaser"] = v
+
+        if _field_bad("send_to", merged.get("send_to")):
+            i_s = None
+            for ii, ln in enumerate(seq):
+                if _match_label(ln) == "SEND TO":
+                    i_s = ii
+                    break
+            if i_s is not None:
+                parts = []
+                for j in range(i_s + 1, min(len(seq), i_s + 12)):
+                    if _match_label(seq[j]) is not None:
+                        break
+                    parts.append(seq[j])
+                v = " ".join([p for p in parts if p]).strip()
+                if v:
+                    merged["send_to"] = v
+    except Exception:
+        pass
+
     # Heuristic: label on one line, value on next line (common in sales order headers)
     lines = [ln.strip() for ln in (text or "").replace("\r", "\n").split("\n")]
     label_map = {
@@ -1633,6 +2284,10 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "field_pairs": _fields_to_pairs(pp_fields),
                     "preprocess": {"enabled": False, "target": "pdf_text"},
                 }
+                try:
+                    page_res["tables"] = [_build_ai_kv_table_from_fields(pp_fields)]
+                except Exception:
+                    page_res["tables"] = []
                 all_pages.append(page_res)
                 if pp_text.strip():
                     combined_texts.append(pp_text.strip())
@@ -1720,6 +2375,13 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(page_res.get("tables"), list):
             page_res["tables"] = [_table_add_rows_matrix(t) for t in (page_res.get("tables") or [])]
 
+        try:
+            if isinstance(page_res.get("fields"), dict):
+                ai_tbl = _build_ai_kv_table_from_fields(page_res.get("fields"))
+                page_res["tables"] = [ai_tbl] + (page_res.get("tables") or [])
+        except Exception:
+            pass
+
         # Inject text-derived fields into AI key/value tables when table-based extraction missed them
         try:
             fields = page_res.get("fields") or {}
@@ -1729,7 +2391,52 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "purchaser": "PURCHASER",
                     "supplier": "SUPPLIER",
                     "payment_terms": "PAYMENT TERMS",
+                    "article": "ARTICLE",
+                    "description": "DESCRIPTION",
+                    "market_of_origin": "MARKET OF ORIGIN",
+                    "pvp": "PVP",
                 }
+
+                def _is_contaminated_value(key: str, cur: str) -> bool:
+                    k = (key or "").strip().upper()
+                    c = (cur or "").strip()
+                    if not c:
+                        return True
+                    # Generic contamination
+                    if re.fullmatch(r"COL_?\d+", c.strip(), flags=re.IGNORECASE):
+                        return True
+                    if re.search(r"\b(TOTAL|DRIGIN|MARKETOF)\b", c, flags=re.IGNORECASE):
+                        return True
+                    # If it still contains a label token (e.g. "1517 BUYER") it's likely wrong
+                    try:
+                        if "_split_value_label" in locals():
+                            sp = _split_value_label(c)
+                            if sp is not None and sp[0] and sp[1]:
+                                return True
+                    except Exception:
+                        pass
+                    if k == "SUPPLIER REF":
+                        if re.search(r"\b(OUTER\s+SHELL|LINING|COMPOSITION|COMPOSITIONS|CARE|INSTRUCTIONS|TOTAL)\b", c, flags=re.IGNORECASE):
+                            return True
+                        if re.fullmatch(r"\d{2,4}\-?[A-Z]{2,}", c.replace(" ", "").upper()):
+                            return True
+                    if k == "MARKET OF ORIGIN":
+                        if not re.search(r"\b[A-Z]{3,}\b", c):
+                            return True
+                    if k == "PVP":
+                        if not (re.search(r"\b(EUR|USD|GBP)\b", c, flags=re.IGNORECASE) or re.search(r"\b\d+[\.,]\d{2}\b", c)):
+                            return True
+                    if k == "DESCRIPTION":
+                        if re.search(r"\b(EUR|USD|GBP)\b", c, flags=re.IGNORECASE):
+                            return True
+                    return False
+
+                def _should_override(key: str, cur: str, new_val: str) -> bool:
+                    if not new_val or not str(new_val).strip():
+                        return False
+                    if not cur or not str(cur).strip():
+                        return True
+                    return _is_contaminated_value(key, str(cur))
                 for tbl in page_res.get("tables") or []:
                     if not isinstance(tbl, dict):
                         continue
@@ -1747,11 +2454,16 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                             if not k:
                                 continue
                             for f_name, target_key in field_to_key.items():
-                                if k == target_key and (p.get("value") is None or str(p.get("value") or "").strip() == ""):
+                                if k == target_key:
                                     v = fields.get(f_name)
-                                    if isinstance(v, str) and v.strip():
+                                    if isinstance(v, str) and _should_override(k, str(p.get("value") or ""), v):
                                         p["value"] = v.strip()
                                         changed = True
+                            # Force SUPPLIER REF blank if it looks contaminated
+                            if k == "SUPPLIER REF" and _is_contaminated_value(k, str(p.get("value") or "")):
+                                if str(p.get("value") or "").strip() != "":
+                                    p["value"] = ""
+                                    changed = True
                         if changed:
                             tbl["rows"] = [{"key": p.get("key"), "value": p.get("value")} for p in kv_all if isinstance(p, dict)]
                             tbl["rows_matrix"] = [[str(p.get("key") or ""), str(p.get("value") or "")] for p in kv_all if isinstance(p, dict)]
@@ -1908,13 +2620,19 @@ async def ocr_extract(
                 if p.get("fields"):
                     combined_fields.append({"page": p.get("page"), **(p.get("fields") or {})})
 
+            combined_field_pairs: List[Dict[str, Any]] = []
+            for p in all_pages:
+                for pair in (p.get("field_pairs") or []):
+                    if isinstance(pair, dict) and pair.get("key") is not None and pair.get("value") is not None:
+                        combined_field_pairs.append({"page": p.get("page"), **pair})
+
             return JSONResponse(
                 {
                     "filename": filename,
                     "engine": "pdfplumber",
                     "pages": all_pages,
                     "text": "\n\n".join(combined_texts).strip(),
-                    "tables": [],
+                    "tables": [{"page": p.get("page"), **t} for p in all_pages for t in (p.get("tables") or [])],
                     "fields": combined_fields,
                     "field_pairs": combined_field_pairs,
                 }
@@ -2005,6 +2723,13 @@ async def ocr_extract(
 
             if isinstance(page_res.get("tables"), list):
                 page_res["tables"] = [_table_add_rows_matrix(t) for t in (page_res.get("tables") or [])]
+
+            try:
+                if isinstance(page_res.get("fields"), dict):
+                    ai_tbl = _build_ai_kv_table_from_fields(page_res.get("fields"))
+                    page_res["tables"] = [ai_tbl] + (page_res.get("tables") or [])
+            except Exception:
+                pass
 
             page_res["field_pairs"] = _fields_to_pairs(page_res.get("fields"))
 

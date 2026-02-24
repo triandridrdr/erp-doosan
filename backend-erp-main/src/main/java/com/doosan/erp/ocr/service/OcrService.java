@@ -179,27 +179,59 @@ public class OcrService {
     }
 
     private Map<String, String> parsePythonFields(JsonNode fieldsNode) {
-        if (fieldsNode == null || fieldsNode.isNull() || !fieldsNode.isObject()) {
+        if (fieldsNode == null || fieldsNode.isNull()) {
             return Map.of();
         }
+
         Map<String, String> out = new LinkedHashMap<>();
-        Iterator<Map.Entry<String, JsonNode>> it = fieldsNode.fields();
-        while (it.hasNext()) {
-            Map.Entry<String, JsonNode> e = it.next();
-            String k = e.getKey();
-            if (k == null || k.isBlank()) {
-                continue;
+
+        // Python may return fields as an object (single-page/image) or array (per-page fields for PDF)
+        if (fieldsNode.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> it = fieldsNode.fields();
+            while (it.hasNext()) {
+                Map.Entry<String, JsonNode> e = it.next();
+                String k = e.getKey();
+                if (k == null || k.isBlank() || "page".equalsIgnoreCase(k)) {
+                    continue;
+                }
+                JsonNode v = e.getValue();
+                if (v == null || v.isNull()) {
+                    continue;
+                }
+                String s = v.isTextual() ? v.asText() : v.toString();
+                if (s != null && !s.isBlank()) {
+                    out.put(k, s.trim());
+                }
             }
-            JsonNode v = e.getValue();
-            if (v == null || v.isNull()) {
-                continue;
-            }
-            String s = v.isTextual() ? v.asText() : v.toString();
-            if (s != null && !s.isBlank()) {
-                out.put(k, s.trim());
-            }
+            return out;
         }
-        return out;
+
+        if (fieldsNode.isArray()) {
+            for (JsonNode item : fieldsNode) {
+                if (item == null || item.isNull() || !item.isObject()) {
+                    continue;
+                }
+                Iterator<Map.Entry<String, JsonNode>> it = item.fields();
+                while (it.hasNext()) {
+                    Map.Entry<String, JsonNode> e = it.next();
+                    String k = e.getKey();
+                    if (k == null || k.isBlank() || "page".equalsIgnoreCase(k)) {
+                        continue;
+                    }
+                    JsonNode v = e.getValue();
+                    if (v == null || v.isNull()) {
+                        continue;
+                    }
+                    String s = v.isTextual() ? v.asText() : v.toString();
+                    if (s != null && !s.isBlank() && !out.containsKey(k)) {
+                        out.put(k, s.trim());
+                    }
+                }
+            }
+            return out;
+        }
+
+        return Map.of();
     }
 
     private List<TableDto> parsePythonTables(JsonNode tablesNode) {
