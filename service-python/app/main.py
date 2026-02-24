@@ -1667,6 +1667,81 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                     if len(ln) >= 6:
                         merged["description"] = ln
                         break
+
+        # Header row parsing: "ORDER NR DATE SUPPLIER" then "<order> <date> <supplier>"
+        # OCR often flattens these into a single line; parse by known token shapes.
+        if _field_bad("order_no", merged.get("order_no")) or _field_bad("date", merged.get("date")) or _field_bad("supplier", merged.get("supplier")):
+            for i in range(0, max(0, len(lines2) - 1)):
+                h = _norm_key(lines2[i])
+                if not ("ordernr" in h and "date" in h and "supplier" in h):
+                    continue
+                # take next non-empty line as the values row
+                j = i + 1
+                while j < len(lines2) and not lines2[j].strip():
+                    j += 1
+                if j >= len(lines2):
+                    break
+                vline = lines2[j]
+                m_ord = re.search(r"\b([A-Z0-9]{2,}[\-/][A-Z0-9]{1,})\b", vline.replace(" ", ""), flags=re.IGNORECASE)
+                m_dt = re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", vline)
+                if m_ord and _field_bad("order_no", merged.get("order_no")):
+                    merged["order_no"] = m_ord.group(1).strip()
+                if m_dt and _field_bad("date", merged.get("date")):
+                    merged["date"] = m_dt.group(1).strip()
+                # supplier = remaining text after removing order/date tokens
+                if _field_bad("supplier", merged.get("supplier")):
+                    supplier_txt = vline
+                    if m_ord:
+                        supplier_txt = supplier_txt.replace(m_ord.group(1), " ")
+                        supplier_txt = supplier_txt.replace(m_ord.group(1).replace("-", " - "), " ")
+                    if m_dt:
+                        supplier_txt = supplier_txt.replace(m_dt.group(1), " ")
+                    supplier_txt = " ".join(supplier_txt.split()).strip(" -\t")
+                    if supplier_txt and len(supplier_txt) >= 4:
+                        merged["supplier"] = supplier_txt
+                break
+
+        # Header row parsing: "SEASON BUYER PAYMENT TERMS" then "W 2025 1516 TRANSF..."
+        if _field_bad("season", merged.get("season")) or _field_bad("buyer", merged.get("buyer")) or _field_bad("payment_terms", merged.get("payment_terms")):
+            for i in range(0, max(0, len(lines2) - 1)):
+                h = _norm_key(lines2[i])
+                if not ("season" in h and "buyer" in h and "paymentterms" in h):
+                    continue
+                j = i + 1
+                while j < len(lines2) and not lines2[j].strip():
+                    j += 1
+                if j >= len(lines2):
+                    break
+                vline = lines2[j]
+                # season like "W 2025" or "S 2024"
+                m_season = re.search(r"\b([WS])\s*(\d{4})\b", vline, flags=re.IGNORECASE)
+                # buyer is typically a short numeric/alpha code
+                m_buyer = re.search(r"\b([A-Z0-9]{1,8})\b", vline.replace(" ", "").upper())
+                if m_season and _field_bad("season", merged.get("season")):
+                    merged["season"] = f"{m_season.group(1).upper()} {m_season.group(2)}".strip()
+                # buyer: prefer the first 3-6 digit token after season
+                buyer_val = None
+                post = vline
+                if m_season:
+                    post = vline[m_season.end() :]
+                m_buyer2 = re.search(r"\b(\d{3,6}|[A-Z0-9]{1,8})\b", post.strip(), flags=re.IGNORECASE)
+                if m_buyer2:
+                    buyer_val = m_buyer2.group(1).strip()
+                elif m_buyer:
+                    buyer_val = m_buyer.group(1).strip()
+                if buyer_val and _field_bad("buyer", merged.get("buyer")):
+                    merged["buyer"] = buyer_val.replace(" ", "")
+                # payment terms: remainder after removing season and buyer token
+                if _field_bad("payment_terms", merged.get("payment_terms")):
+                    payment_txt = vline
+                    if m_season:
+                        payment_txt = payment_txt.replace(m_season.group(0), " ")
+                    if buyer_val:
+                        payment_txt = re.sub(r"\b" + re.escape(buyer_val) + r"\b", " ", payment_txt)
+                    payment_txt = " ".join(payment_txt.split()).strip(" -\t")
+                    if payment_txt and len(payment_txt) >= 6:
+                        merged["payment_terms"] = payment_txt
+                break
     except Exception:
         pass
 
@@ -1948,6 +2023,26 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                 v = " ".join([p for p in parts if p]).strip()
                 if v:
                     merged["purchaser"] = v
+            else:
+                # OCR sometimes mixes columns so PURCHASER label appears without subsequent lines.
+                # Heuristic: capture the purchaser company block (EMEA Aspire Trading...) before Tax office number.
+                i_em = None
+                for ii, ln in enumerate(seq):
+                    if re.search(r"\bEMEA\b", ln, flags=re.IGNORECASE) and re.search(r"\b(ASPIRE|TRADING)\b", ln, flags=re.IGNORECASE):
+                        i_em = ii
+                        break
+                if i_em is not None:
+                    parts: List[str] = []
+                    for j in range(i_em, min(len(seq), i_em + 10)):
+                        if re.search(r"\btax\s*office\s*number\b", seq[j], flags=re.IGNORECASE):
+                            break
+                        # stop when we reach the order header block
+                        if re.search(r"\border\s*nr\b", seq[j], flags=re.IGNORECASE) and re.search(r"\bdate\b", seq[j], flags=re.IGNORECASE):
+                            break
+                        parts.append(seq[j])
+                    v = " ".join([p for p in parts if p]).strip()
+                    if v:
+                        merged["purchaser"] = v
 
         if _field_bad("send_to", merged.get("send_to")):
             i_s = None
