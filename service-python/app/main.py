@@ -1459,6 +1459,11 @@ def _extract_fields_from_text(text: str) -> Dict[str, Any]:
     fields["tax_office_number"] = _first(r"\btax\s*office\s*number\b\s*[:\-]?\s*([0-9]{8,})")
 
     cleaned = {k: v for k, v in fields.items() if v is not None}
+    # Backward-compatible alias: some clients expect order_nr
+    if "order_no" in cleaned and "order_nr" not in cleaned:
+        cleaned["order_nr"] = cleaned.get("order_no")
+    elif "order_nr" in cleaned and "order_no" not in cleaned:
+        cleaned["order_no"] = cleaned.get("order_nr")
     return cleaned
 
 
@@ -1556,6 +1561,27 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
         if field in {"season"}:
             if not re.search(r"\b[WS]\b", s, flags=re.IGNORECASE) and not re.search(r"\b\d{4}\b", s):
                 return True
+            # season should not contain other label words
+            if re.search(r"\b(buyer|payment\s*terms|supplier|date|order)\b", s, flags=re.IGNORECASE):
+                return True
+        if field in {"supplier"}:
+            # supplier should not be prefixed with order/date tokens
+            if re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", s):
+                return True
+            if re.search(r"\b[A-Z0-9]{2,}[\-/][A-Z0-9]{1,}\b", s.replace(" ", "").upper()):
+                return True
+            if re.search(r"\b(order\s*nr|order\s*no|date)\b", s, flags=re.IGNORECASE):
+                return True
+        if field in {"purchaser"}:
+            # purchaser block should not collapse to another label
+            if re.search(r"\b(send\s*to|ship\s*to|payment\s*terms|buyer|season|supplier|date|order)\b", s, flags=re.IGNORECASE):
+                return True
+        if field in {"payment_terms"}:
+            # payment terms should not contain season/buyer header tokens
+            if re.search(r"\b[WS]\s*\d{4}\b", s, flags=re.IGNORECASE) and re.search(r"\b\d{3,6}\b", s):
+                # if it begins with season/buyer-like tokens, treat as contaminated
+                if re.match(r"^\s*[WS]\s*\d{4}\s+\d{3,6}\b", s, flags=re.IGNORECASE):
+                    return True
         if field in {"pvp"}:
             if not (re.search(r"\b(EUR|USD|GBP)\b", s, flags=re.IGNORECASE) and re.search(r"\b\d+[\.,]\d{2}\b", s)):
                 return True
@@ -1682,7 +1708,8 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                 if j >= len(lines2):
                     break
                 vline = lines2[j]
-                m_ord = re.search(r"\b([A-Z0-9]{2,}[\-/][A-Z0-9]{1,})\b", vline.replace(" ", ""), flags=re.IGNORECASE)
+                # IMPORTANT: do not remove spaces here; it can glue order + date and overmatch
+                m_ord = re.search(r"\b([A-Z0-9]{2,}[\-/][A-Z0-9]{1,})\b", vline, flags=re.IGNORECASE)
                 m_dt = re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", vline)
                 if m_ord and _field_bad("order_no", merged.get("order_no")):
                     merged["order_no"] = m_ord.group(1).strip()
@@ -1952,7 +1979,7 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
             return None
 
         def _is_order_no(v: str) -> bool:
-            vv = v.replace(" ", "").upper()
+            vv = (v or "").upper()
             return re.search(r"\b[A-Z0-9]{2,}[\-/][A-Z0-9]{1,}\b", vv) is not None and re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", vv) is None
 
         def _is_date(v: str) -> bool:
@@ -1978,7 +2005,7 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
         if _field_bad("order_no", merged.get("order_no")):
             v = _find_value_after("ORDER-NR", _is_order_no)
             if v:
-                m = re.search(r"\b([A-Z0-9\-/]+)\b", v.replace(" ", ""), flags=re.IGNORECASE)
+                m = re.search(r"\b([A-Z0-9]{2,}[\-/][A-Z0-9]{1,})\b", v, flags=re.IGNORECASE)
                 merged["order_no"] = (m.group(1) if m else v).strip()
 
         if _field_bad("date", merged.get("date")):
@@ -2023,26 +2050,29 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                 v = " ".join([p for p in parts if p]).strip()
                 if v:
                     merged["purchaser"] = v
-            else:
-                # OCR sometimes mixes columns so PURCHASER label appears without subsequent lines.
-                # Heuristic: capture the purchaser company block (EMEA Aspire Trading...) before Tax office number.
+
+            # OCR sometimes mixes columns so PURCHASER label appears without subsequent lines (next label is SEND TO)
+            # or its value is captured elsewhere. Heuristic: capture the purchaser company block (EMEA Aspire Trading...)
+            # before Tax office number / order header.
+            if _field_bad("purchaser", merged.get("purchaser")):
                 i_em = None
                 for ii, ln in enumerate(seq):
                     if re.search(r"\bEMEA\b", ln, flags=re.IGNORECASE) and re.search(r"\b(ASPIRE|TRADING)\b", ln, flags=re.IGNORECASE):
                         i_em = ii
                         break
                 if i_em is not None:
-                    parts: List[str] = []
-                    for j in range(i_em, min(len(seq), i_em + 10)):
+                    parts2: List[str] = []
+                    for j in range(i_em, min(len(seq), i_em + 12)):
                         if re.search(r"\btax\s*office\s*number\b", seq[j], flags=re.IGNORECASE):
                             break
-                        # stop when we reach the order header block
                         if re.search(r"\border\s*nr\b", seq[j], flags=re.IGNORECASE) and re.search(r"\bdate\b", seq[j], flags=re.IGNORECASE):
                             break
-                        parts.append(seq[j])
-                    v = " ".join([p for p in parts if p]).strip()
-                    if v:
-                        merged["purchaser"] = v
+                        if _match_label(seq[j]) is not None and j != i_em:
+                            break
+                        parts2.append(seq[j])
+                    v2 = " ".join([p for p in parts2 if p]).strip()
+                    if v2:
+                        merged["purchaser"] = v2
 
         if _field_bad("send_to", merged.get("send_to")):
             i_s = None
@@ -2051,11 +2081,58 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                     i_s = ii
                     break
             if i_s is not None:
+                def _stop_sendto_line(s: str) -> bool:
+                    if not (s or "").strip():
+                        return False
+                    if _match_label(s) is not None:
+                        return True
+                    # Stop at strong anchors / header rows
+                    if re.search(r"\btax\s*office\s*number\b", s, flags=re.IGNORECASE):
+                        return True
+                    if re.search(r"\border\s*nr\b", s, flags=re.IGNORECASE) and re.search(r"\bdate\b", s, flags=re.IGNORECASE):
+                        return True
+                    if re.search(r"\bseason\b", s, flags=re.IGNORECASE) and re.search(r"\bbuyer\b", s, flags=re.IGNORECASE):
+                        return True
+                    return False
+
+                # When OCR merges two columns, purchaser text can leak into send_to lines.
+                # Trim everything after purchaser-anchors (BCW OFFICE, DUBAI, EMIRATOS, EMEA ASPIRE, TRADING FZE).
+                def _trim_purchaser_tail(s: str) -> str:
+                    t = (s or "").strip()
+                    if not t:
+                        return t
+                    anchors = [
+                        r"\bBCW\b",
+                        r"\bOFFICE\b",
+                        r"\bEXPOREGISTER\b",
+                        r"\bDUBAI\b",
+                        r"\bEMIRATOS\b",
+                        r"\bEMEA\b",
+                        r"\bASPIRE\b",
+                        r"\bTRADING\b",
+                        r"\bFZE\b",
+                    ]
+                    mpos = None
+                    for a in anchors:
+                        m = re.search(a, t, flags=re.IGNORECASE)
+                        if m:
+                            mpos = m.start() if mpos is None else min(mpos, m.start())
+                    if mpos is not None and mpos > 0:
+                        t = t[:mpos].rstrip(" ,;:-\t")
+                    return t
+
                 parts = []
-                for j in range(i_s + 1, min(len(seq), i_s + 12)):
-                    if _match_label(seq[j]) is not None:
+                for j in range(i_s + 1, min(len(seq), i_s + 20)):
+                    ln = (seq[j] or "").strip()
+                    if _stop_sendto_line(ln):
                         break
-                    parts.append(seq[j])
+                    ln2 = _trim_purchaser_tail(ln)
+                    if not ln2:
+                        continue
+                    # If the line is clearly purchaser-column after trimming, skip it
+                    if re.search(r"\b(DUBAI|EMIRATOS|EXPOREGISTER|BCW|EMEA|ASPIRE|TRADING|FZE)\b", ln2, flags=re.IGNORECASE):
+                        continue
+                    parts.append(ln2)
                 v = " ".join([p for p in parts if p]).strip()
                 if v:
                     merged["send_to"] = v
@@ -2209,6 +2286,22 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
         m = re.search(r"\b(\d{3,}[A-Z]?\-\w+)\b", text or "")
         if m:
             merged["order_no"] = (m.group(1) or "").strip()
+
+    # Normalize payment_terms: remove leading season/buyer if OCR prepends it
+    if isinstance(merged.get("payment_terms"), str):
+        pt = merged.get("payment_terms") or ""
+        # Example: "W 2025 1516 TRANSF. 90 DAYS ..." -> "TRANSF. 90 DAYS ..."
+        pt2 = re.sub(r"^\s*[WS]\s*\d{4}\s+\d{3,6}\s+", "", pt, flags=re.IGNORECASE).strip()
+        # Sometimes label words also leak: "BUYER PAYMENT TERMS W 2025 1516 TRANSF..."
+        pt2 = re.sub(r"^\s*(?:buyer\s+)?payment\s*terms\s+", "", pt2, flags=re.IGNORECASE).strip()
+        if pt2 and pt2 != pt:
+            merged["payment_terms"] = pt2
+
+    # Backward-compatible alias: clients may use order_nr
+    if "order_no" in merged and "order_nr" not in merged:
+        merged["order_nr"] = merged.get("order_no")
+    elif "order_nr" in merged and "order_no" not in merged:
+        merged["order_no"] = merged.get("order_nr")
 
     return merged
 
