@@ -2082,6 +2082,9 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                 # if it begins with season/buyer-like tokens, treat as contaminated
                 if re.match(r"^\s*[WS]\s*\d{4}\s+\d{3,6}\b", s, flags=re.IGNORECASE):
                     return True
+            # If payment terms collapses to just a season value (common OCR swap), treat as bad
+            if re.fullmatch(r"\s*[WS]\s*\d{4}\s*", s, flags=re.IGNORECASE):
+                return True
         if field in {"pvp"}:
             if not (re.search(r"\b(EUR|USD|GBP)\b", s, flags=re.IGNORECASE) and re.search(r"\b\d+[\.,]\d{2}\b", s)):
                 return True
@@ -2095,6 +2098,20 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
 
     # Garment SO/PO: anchor-based parsing from raw OCR text to handle mixed layouts (left->right and top->bottom)
     try:
+        def _join_prices(lines: List[str]) -> str:
+            out: List[str] = []
+            seen = set()
+            for ln in (lines or []):
+                s = " ".join(str(ln or "").strip().split())
+                if not s:
+                    continue
+                k = s.upper()
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(s)
+            return ", ".join(out).strip()
+
         def _norm_line(s: str) -> str:
             return " ".join((s or "").strip().split())
 
@@ -2163,8 +2180,14 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                 return re.search(r"\b(EUR|USD|GBP)\b", s, flags=re.IGNORECASE) is not None and re.search(r"\b\d+[\.,]\d{2}\b", s) is not None
 
             prices = [ln for ln in block if _is_price(ln)]
-            if prices and _field_bad("pvp", merged.get("pvp")):
-                merged["pvp"] = " ".join(prices).strip()
+            if prices:
+                pv = _join_prices(prices)
+                if pv:
+                    existing = str(merged.get("pvp") or "").strip()
+                    existing_count = len([p for p in re.split(r"\s*,\s*", existing) if p.strip()]) if existing else 0
+                    new_count = len([p for p in pv.split(",") if p.strip()])
+                    if _field_bad("pvp", merged.get("pvp")) or new_count > existing_count:
+                        merged["pvp"] = pv
 
             if _field_bad("article", merged.get("article")):
                 for ln in block:
@@ -2446,7 +2469,9 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                 if _field_bad("pvp", merged.get("pvp")):
                     prices = [ln for ln in block if _is_price_line(ln)]
                     if prices:
-                        merged["pvp"] = " ".join(prices).strip()
+                        pv = _join_prices(prices)
+                        if pv:
+                            merged["pvp"] = pv
 
                 if _field_bad("description", merged.get("description")):
                     for ln in block:
@@ -2478,6 +2503,32 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                         return v
             return None
 
+        def _find_values_after(canon_label: str, validator, max_lookahead: int = 10) -> List[str]:
+            vals: List[str] = []
+            for idx, ln in enumerate(seq):
+                if _match_label(ln) != canon_label:
+                    continue
+                try:
+                    ln0 = (ln or "").strip()
+                    if canon_label == "PVP":
+                        m = re.search(r"\b\d+[\.,]\d{2}\b\s*(?:EUR|USD|GBP)\b", ln0, flags=re.IGNORECASE)
+                        if m:
+                            v0 = m.group(0).strip()
+                            if validator(v0):
+                                vals.append(v0)
+                except Exception:
+                    pass
+                for j in range(idx + 1, min(len(seq), idx + 1 + max_lookahead)):
+                    v = (seq[j] or "").strip()
+                    if not v:
+                        continue
+                    if _match_label(v) is not None:
+                        break
+                    if validator(v):
+                        vals.append(v)
+                break
+            return vals
+
         def _is_order_no(v: str) -> bool:
             vv = (v or "").upper()
             return re.search(r"\b[A-Z0-9]{2,}[\-/][A-Z0-9]{1,}\b", vv) is not None and re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", vv) is None
@@ -2501,6 +2552,9 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
             if len(v) < 6:
                 return False
             return re.search(r"\b(CO\.?|LTD\.?|LIMITED|TRADING|COMPANY)\b", v, flags=re.IGNORECASE) is not None or re.search(r"\b[A-Z]{2,}\b", v) is not None
+
+        def _is_pvp(v: str) -> bool:
+            return _is_price_line(v)
 
         if _field_bad("order_no", merged.get("order_no")):
             v = _find_value_after("ORDER-NR", _is_order_no)
@@ -2533,6 +2587,20 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
             v = _find_value_after("SUPPLIER", _is_supplier, max_lookahead=10)
             if v:
                 merged["supplier"] = v.strip()
+
+        # PVP may be multiple lines; collect all price-like values after the label
+        try:
+            pvps = _find_values_after("PVP", _is_pvp, max_lookahead=14)
+            if pvps:
+                pv = _join_prices(pvps)
+                if pv:
+                    existing = str(merged.get("pvp") or "").strip()
+                    existing_count = len([p for p in re.split(r"\s*,\s*", existing) if p.strip()]) if existing else 0
+                    new_count = len([p for p in re.split(r"\s*,\s*", pv) if p.strip()])
+                    if _field_bad("pvp", merged.get("pvp")) or new_count > existing_count:
+                        merged["pvp"] = pv
+        except Exception:
+            pass
 
         # Purchaser / send_to: avoid capturing another label as the value
         if _field_bad("purchaser", merged.get("purchaser")):
@@ -2786,6 +2854,107 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
         m = re.search(r"\b(\d{3,}[A-Z]?\-\w+)\b", text or "")
         if m:
             merged["order_no"] = (m.group(1) or "").strip()
+
+    # Text-window fallback for multi-line PVP (when OCR keeps prices as free text, not seq/table)
+    try:
+        pvp_existing = str(merged.get("pvp") or "").strip()
+        pvp_existing_count = len([p for p in re.split(r"\s*,\s*", pvp_existing) if p.strip()]) if pvp_existing else 0
+        if pvp_existing_count < 2 and isinstance(text, str) and text.strip():
+            price_re = re.compile(r"\b\d+[\.,]\d{2}\b\s*(?:EUR|USD|GBP)\b", flags=re.IGNORECASE)
+            candidates: List[str] = []
+            t0 = text
+            for m in re.finditer(r"\bPVP\b", t0, flags=re.IGNORECASE):
+                start = m.start()
+                # Scan a bounded window after the PVP label for price tokens
+                window = t0[start : min(len(t0), start + 900)]
+                for mm in price_re.finditer(window):
+                    candidates.append(mm.group(0).strip())
+                if candidates:
+                    break
+            pv = _join_prices(candidates) if candidates else ""
+            if pv:
+                new_count = len([p for p in re.split(r"\s*,\s*", pv) if p.strip()])
+                if new_count > pvp_existing_count:
+                    merged["pvp"] = pv
+    except Exception:
+        pass
+
+    # Table-based fallback for multi-line PVP (often appears as multiple rows in a PVP column)
+    try:
+        pvp_existing = str(merged.get("pvp") or "").strip()
+        pvp_existing_count = len([p for p in re.split(r"\s*,\s*", pvp_existing) if p.strip()]) if pvp_existing else 0
+        if pvp_existing_count < 2 and isinstance(tables, list) and tables:
+            price_re = re.compile(r"\b\d+[\.,]\d{2}\b\s*(?:EUR|USD|GBP)\b", flags=re.IGNORECASE)
+
+            def _collect_prices_from_cell(v: Any) -> List[str]:
+                s = str(v or "").strip()
+                if not s:
+                    return []
+                parts = re.split(r"[\n\r]+", s)
+                out: List[str] = []
+                for part in parts:
+                    for m in price_re.finditer(part):
+                        out.append(m.group(0).strip())
+                return out
+
+            candidates: List[str] = []
+            for t in tables:
+                if not isinstance(t, dict):
+                    continue
+                tk = str(t.get("table_kind") or "").strip().lower()
+                if tk in {"total_order_grid", "partial_deliveries_grid"}:
+                    continue
+
+                headers = t.get("headers") or []
+                rows = t.get("rows") or []
+                if not isinstance(headers, list) or not headers:
+                    continue
+
+                # Find a PVP column in headers (robust to OCR variants)
+                pvp_key: Optional[str] = None
+                for h in headers:
+                    hh = str(h or "")
+                    if re.search(r"\bPVP\b", hh, flags=re.IGNORECASE) or _norm_key(hh) == "pvp":
+                        pvp_key = str(h)
+                        break
+                if pvp_key is None:
+                    continue
+
+                if isinstance(rows, list):
+                    for r in rows:
+                        if isinstance(r, dict) and pvp_key in r:
+                            candidates.extend(_collect_prices_from_cell(r.get(pvp_key)))
+                        elif isinstance(r, dict):
+                            # Sometimes keys are normalized differently; try any key that looks like PVP
+                            for kk, vv in r.items():
+                                if re.search(r"\bPVP\b", str(kk or ""), flags=re.IGNORECASE) or _norm_key(str(kk or "")) == "pvp":
+                                    candidates.extend(_collect_prices_from_cell(vv))
+                                    break
+
+                rm = t.get("rows_matrix")
+                if isinstance(rm, list) and rm:
+                    try:
+                        header_row = rm[0] if isinstance(rm[0], list) else None
+                        if isinstance(header_row, list):
+                            idx = None
+                            for i, h in enumerate(header_row):
+                                if re.search(r"\bPVP\b", str(h or ""), flags=re.IGNORECASE) or _norm_key(str(h or "")) == "pvp":
+                                    idx = i
+                                    break
+                            if idx is not None:
+                                for row in rm[1:]:
+                                    if isinstance(row, list) and idx < len(row):
+                                        candidates.extend(_collect_prices_from_cell(row[idx]))
+                    except Exception:
+                        pass
+
+            pv = _join_prices(candidates)
+            if pv:
+                new_count = len([p for p in re.split(r"\s*,\s*", pv) if p.strip()])
+                if new_count > pvp_existing_count:
+                    merged["pvp"] = pv
+    except Exception:
+        pass
 
     # Normalize payment_terms: remove leading season/buyer if OCR prepends it
     if isinstance(merged.get("payment_terms"), str):
