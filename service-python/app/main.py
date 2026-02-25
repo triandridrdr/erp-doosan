@@ -2425,6 +2425,208 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                         merged["composition_label_part_colors"] = lines[i + 1].strip()
                     break
 
+    # COMPOSITIONS INFORMATION: often appears as a material table (OUTER SHELL / MAIN FABRIC / ...) without the label.
+    # Build a compact multi-line string from either text or table rows.
+    if _field_bad("compositions_information", merged.get("compositions_information")):
+        try:
+            def _format_compositions_info(s: str) -> str:
+                out = " ".join((s or "").replace("\r", "\n").replace("\n", " ").split()).strip()
+                if not out:
+                    return out
+                out = re.sub(r"\s*,\s*", ", ", out).strip(" ,")
+                out = re.sub(r"(,\s*){2,}", ", ", out)
+                return out.strip(" ,")
+
+            def _parse_composition_from_tables(tables_any: Any) -> str:
+                if not isinstance(tables_any, list):
+                    return ""
+
+                section_order = ["EMBELLISHMENT", "MAIN FABRIC", "SECONDARY FABRIC"]
+                section_set = set(section_order)
+                outer_shell_seen = False
+                except_trimmings_seen = False
+                current_section: Optional[str] = None
+
+                materials: Dict[str, List[str]] = {k: [] for k in section_order}
+
+                def _norm_cell(x: Any) -> str:
+                    return " ".join(str(x or "").replace("\r", " ").replace("\n", " ").split()).strip()
+
+                def _cell_is_stop(s: str) -> bool:
+                    return (
+                        re.search(
+                            r"\b(CARE\s+INSTRUCTIONS|HANGTAG\s+LABEL|MAIN\s+LABEL|EXTERNAL\s+FABRIC|HANGING|TOTAL\s+ORDER|ORDER\-?NR|DATE|SUPPLIER|ARTICLE|DESCRIPTION|MARKET\s+OF\s+ORIGIN|PVP)\b",
+                            s,
+                            flags=re.IGNORECASE,
+                        )
+                        is not None
+                    )
+
+                def _cell_is_outer_shell(s: str) -> bool:
+                    return re.search(r"\bOUTER\s+SHELL\b", s, flags=re.IGNORECASE) is not None
+
+                def _cell_is_except_trimmings(s: str) -> bool:
+                    return re.search(r"\bEXCEPT\s+FOR\s+TRIMMINGS\b", s, flags=re.IGNORECASE) is not None
+
+                def _cell_section(s: str) -> Optional[str]:
+                    for sec in section_order:
+                        if re.search(r"\b" + re.escape(sec) + r"\b", s, flags=re.IGNORECASE):
+                            return sec
+                    return None
+
+                def _cell_is_material(s: str) -> bool:
+                    if not s:
+                        return False
+                    if re.search(r"\b\d{1,3}\s*%\b", s) is not None:
+                        return True
+                    if re.search(
+                        r"\b(POLYESTER|VISCOSE|RECYCLED|FILAMENT|ELASTANE|COTTON|NYLON|ACRYLIC|WOOL)\b",
+                        s,
+                        flags=re.IGNORECASE,
+                    ) is not None:
+                        return True
+                    return False
+
+                def _push(sec: Optional[str], s: str) -> None:
+                    if not sec or sec not in section_set:
+                        return
+                    if not s:
+                        return
+                    # Avoid capturing the section header itself as a value
+                    if _cell_section(s) is not None and s.upper() == sec:
+                        return
+                    if _cell_is_outer_shell(s) or _cell_is_except_trimmings(s) or _cell_is_stop(s):
+                        return
+                    materials[sec].append(s)
+
+                for t in tables_any:
+                    rm = (t or {}).get("rows_matrix") if isinstance(t, dict) else None
+                    if not isinstance(rm, list):
+                        continue
+                    for r in rm:
+                        if not isinstance(r, list) or not r:
+                            continue
+                        cells = [_norm_cell(c) for c in r]
+                        cells = [c for c in cells if c]
+                        if not cells:
+                            continue
+                        row_text = " ".join(cells)
+                        if _cell_is_stop(row_text):
+                            continue
+                        if _cell_is_outer_shell(row_text):
+                            outer_shell_seen = True
+                        if _cell_is_except_trimmings(row_text):
+                            except_trimmings_seen = True
+                            current_section = None
+                            continue
+
+                        sec = None
+                        for c in cells:
+                            sec = _cell_section(c) or sec
+                        if sec is not None:
+                            current_section = sec
+                        # Collect material lines from other cells in the same row
+                        for c in cells:
+                            if _cell_is_stop(c) or _cell_is_outer_shell(c) or _cell_is_except_trimmings(c):
+                                continue
+                            if _cell_section(c) is not None:
+                                continue
+                            if _cell_is_material(c):
+                                _push(current_section, c)
+
+                # Build a stable comma-separated output without empty tokens
+                out_parts: List[str] = []
+                if outer_shell_seen:
+                    out_parts.append("OUTER SHELL")
+                for sec in section_order:
+                    vals = materials.get(sec) or []
+                    # Dedup while preserving order
+                    seen = set()
+                    vals2: List[str] = []
+                    for v in vals:
+                        vv = _norm_cell(v)
+                        if not vv:
+                            continue
+                        key = vv.lower()
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        vals2.append(vv)
+                    if vals2:
+                        out_parts.append(sec)
+                        out_parts.extend(vals2)
+                if except_trimmings_seen:
+                    out_parts.append("EXCEPT FOR TRIMMINGS")
+                return _format_compositions_info(", ".join(out_parts))
+
+            def _is_composition_anchor(ln: str) -> bool:
+                return re.search(
+                    r"\b(OUTER\s+SHELL|EXCEPT\s+FOR\s+TRIMMINGS|EMBELLISHMENT|MAIN\s+FABRIC|SECONDARY\s+FABRIC|LINING)\b",
+                    ln or "",
+                    flags=re.IGNORECASE,
+                ) is not None
+
+            def _is_composition_line(ln: str) -> bool:
+                s = (ln or "").strip()
+                if not s:
+                    return False
+                if re.search(r"\b\d{1,3}\s*%\b", s) is not None:
+                    return True
+                if re.search(r"\b(POLYESTER|VISCOSE|RECYCLED|FILAMENT|ELASTANE|COTTON|NYLON|ACRYLIC|WOOL)\b", s, flags=re.IGNORECASE) is not None:
+                    return True
+                return False
+
+            def _is_composition_stop(ln: str) -> bool:
+                return re.search(
+                    r"\b(CARE\s+INSTRUCTIONS|HANGTAG\s+LABEL|MAIN\s+LABEL|EXTERNAL\s+FABRIC|HANGING|TOTAL\s+ORDER|ARTICLE|DESCRIPTION|MARKET\s+OF\s+ORIGIN|PVP)\b",
+                    ln or "",
+                    flags=re.IGNORECASE,
+                ) is not None
+
+            # 1) Text-based capture
+            if isinstance(text, str) and text.strip():
+                lines3 = [ln.strip() for ln in text.replace("\r", "\n").split("\n")]
+                start = None
+                for idx, ln in enumerate(lines3):
+                    if _is_composition_anchor(ln):
+                        start = idx
+                        break
+                if start is not None:
+                    parts: List[str] = []
+                    for ln in lines3[start : start + 60]:
+                        if _is_composition_stop(ln):
+                            break
+                        if _is_composition_anchor(ln) or _is_composition_line(ln):
+                            cleaned_ln = " ".join((ln or "").split()).strip()
+                            if cleaned_ln:
+                                parts.append(cleaned_ln)
+                    # Keep order but remove duplicates
+                    seen = set()
+                    parts2: List[str] = []
+                    for p in parts:
+                        k = p.lower()
+                        if k in seen:
+                            continue
+                        seen.add(k)
+                        parts2.append(p)
+                    if parts2:
+                        merged["compositions_information"] = _format_compositions_info(", ".join(parts2))
+
+            # 2) Table-based capture (when text is messy but rows_matrix is available)
+            if _field_bad("compositions_information", merged.get("compositions_information")) and isinstance(tables, list):
+                parsed = _parse_composition_from_tables(tables)
+                if parsed:
+                    merged["compositions_information"] = parsed
+        except Exception:
+            pass
+
+    # Final normalization: ensure compositions_information is comma-separated for downstream parsing
+    if isinstance(merged.get("compositions_information"), str):
+        try:
+            merged["compositions_information"] = _format_compositions_info(merged.get("compositions_information") or "")
+        except Exception:
+            pass
+
     # Backward-compatible alias: clients may use order_nr
     if "order_no" in merged and "order_nr" not in merged:
         merged["order_nr"] = merged.get("order_no")
