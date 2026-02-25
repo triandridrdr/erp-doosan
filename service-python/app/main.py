@@ -729,6 +729,9 @@ def _table_add_rows_matrix(tbl: Any) -> Any:
                     return True
                 if re.search(r"\b(OUTER\s+SHELL|LINING|HANGTAG|LABEL|COLOUR|COLOR|COMPOSITION|COMPOSITIONS|CARE\s+INSTRUCTIONS|INSTRUCTIONS)\b", v, flags=re.IGNORECASE) is not None:
                     return True
+                # Prices/currencies belong to PVP, not supplier ref
+                if re.search(r"\b(EUR|USD|GBP)\b", v, flags=re.IGNORECASE) is not None and re.search(r"\b\d+[\.,]\d{2}\b", v) is not None:
+                    return True
                 # Weighted color / color code patterns (e.g. "660-WINE") are not supplier refs
                 if re.fullmatch(r"\d{2,4}\s*\-\s*[A-Z]{2,}", v.replace(" ", "").upper()):
                     return True
@@ -1270,12 +1273,26 @@ def _normalize_size_grid_columns(reco: Dict[str, Any]) -> None:
             if i is None:
                 return None
             if kind == "colour":
-                if col_text[i] == 0 and i > 0 and col_text[i - 1] > 0:
-                    return i - 1
+                if col_text[i] > 0:
+                    return i
+                best_i = i
+                best_score = col_text[i]
+                for di in [1, -1, 2, -2]:
+                    j = i + di
+                    if 0 <= j < n and col_text[j] > best_score:
+                        best_i = j
+                        best_score = col_text[j]
+                return best_i
+            if col_numeric[i] > 0:
                 return i
-            if col_numeric[i] == 0 and (i + 1) < n and col_numeric[i + 1] > 0:
-                return i + 1
-            return i
+            best_i = i
+            best_score = col_numeric[i]
+            for di in [1, -1, 2, -2]:
+                j = i + di
+                if 0 <= j < n and col_numeric[j] > best_score:
+                    best_i = j
+                    best_score = col_numeric[j]
+            return best_i
 
         idx_colour = _shift_to_data(idx_colour, "colour")
         idx_xs = _shift_to_data(idx_xs, "num")
@@ -1308,6 +1325,19 @@ def _normalize_size_grid_columns(reco: Dict[str, Any]) -> None:
         idx_m = _fill_if_none(idx_m)
         idx_l = _fill_if_none(idx_l)
         idx_xl = _fill_if_none(idx_xl)
+
+        # Some Partial Deliveries grids have an unlabeled Total column (header OCR missing).
+        # Infer it as the rightmost numeric-heavy column that is not already used by sizes.
+        if idx_total is None:
+            used = {i for i in [idx_colour, idx_xs, idx_s, idx_m, idx_l, idx_xl] if isinstance(i, int)}
+            min_after = max([i for i in [idx_xl, idx_l, idx_m, idx_s, idx_xs] if isinstance(i, int)] or [-1])
+            candidates = [
+                i
+                for i in range(n)
+                if i not in used and i > min_after and col_numeric[i] > 0
+            ]
+            if candidates:
+                idx_total = max(candidates)
 
         if not (idx_colour is not None and idx_xs is not None and idx_total is not None):
             return
@@ -1534,6 +1564,7 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
     regions = _detect_table_regions(image_gray_or_bgr)
 
     tables: List[Dict[str, Any]] = []
+    pd_tables_found = False
     try:
         grid_tbl = _extract_total_order_grid_from_boxes(boxes)
         if grid_tbl is not None:
@@ -1545,12 +1576,35 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
     try:
         pd_tables = _extract_partial_deliveries_grids_from_boxes(boxes)
         if pd_tables:
+            pd_tables_found = True
             for j, t in enumerate(pd_tables, start=1):
                 t["table_index"] = 910 + j
                 t["bbox"] = None
                 tables.append(t)
     except Exception:
         pass
+
+    def _is_partial_deliveries_like_table(t: Any) -> bool:
+        if not isinstance(t, dict):
+            return False
+        tk = str(t.get("table_kind") or "").strip().lower()
+        if tk in {"partial_deliveries_grid"}:
+            return True
+        try:
+            header_text = " ".join([str(h or "") for h in (t.get("headers") or [])]).upper()
+            if "LOGISTIC ORDER" in header_text or "PARTIAL" in header_text:
+                return True
+        except Exception:
+            pass
+        try:
+            rm = t.get("rows_matrix") or []
+            if isinstance(rm, list):
+                head = " ".join([" ".join([str(x or "") for x in (r or [])]) if isinstance(r, list) else str(r or "") for r in rm[:3]]).upper()
+                if "LOGISTIC ORDER" in head and "DELIVERY" in head:
+                    return True
+        except Exception:
+            pass
+        return False
     if regions:
         for i, r in enumerate(regions, start=1):
             rx0, ry0 = float(r["x"]), float(r["y"])
@@ -1563,6 +1617,12 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
             reconstructed = _reconstruct_table_from_boxes(in_region)
             if reconstructed is None:
                 continue
+
+            # If we already extracted Partial Deliveries grids, skip generic table regions that
+            # represent the same section (they tend to merge metadata + multiple grids and break alignment).
+            if pd_tables_found and _is_partial_deliveries_like_table(reconstructed):
+                continue
+
             reconstructed["table_index"] = i
             reconstructed["bbox"] = {"x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"]}
             tables.append(reconstructed)
@@ -2043,6 +2103,9 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
             return True
         if field in {"supplier_ref"}:
             if re.search(r"\b(OUTER\s+SHELL|LINING|COMPOSITION|COMPOSITIONS|CARE|INSTRUCTIONS|TOTAL)\b", s, flags=re.IGNORECASE):
+                return True
+            # Prevent capturing price list as supplier ref
+            if re.search(r"\b(EUR|USD|GBP)\b", s, flags=re.IGNORECASE) is not None and re.search(r"\b\d+[\.,]\d{2}\b", s) is not None:
                 return True
             if re.fullmatch(r"\d{2,4}\-?[A-Z]{2,}", s.replace(" ", "").upper()):
                 return True
