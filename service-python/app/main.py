@@ -40,6 +40,11 @@ except Exception:  # pragma: no cover
     convert_from_bytes = None
 
 try:
+    import fitz  # PyMuPDF
+except Exception:  # pragma: no cover
+    fitz = None
+
+try:
     import pdfplumber
 except Exception:  # pragma: no cover
     pdfplumber = None
@@ -506,6 +511,14 @@ def _table_add_rows_matrix(tbl: Any) -> Any:
             rows_matrix.append([str(x or "") for x in r])
         else:
             rows_matrix.append([str(r)])
+
+    if tbl.get("include_headers_in_rows_matrix") is True and headers_s:
+        try:
+            # Avoid double-prepending if already present
+            if not rows_matrix or rows_matrix[0] != headers_s:
+                rows_matrix = [headers_s] + rows_matrix
+        except Exception:
+            pass
 
     tbl["rows_matrix"] = rows_matrix
 
@@ -1190,6 +1203,312 @@ def _reconstruct_table_from_boxes(boxes: List[Dict[str, Any]]) -> Optional[Dict[
     }
 
 
+def _normalize_size_grid_columns(reco: Dict[str, Any]) -> None:
+    try:
+        headers0 = reco.get("headers") or []
+        rows0 = reco.get("rows") or []
+        if not (isinstance(headers0, list) and isinstance(rows0, list) and headers0 and rows0):
+            return
+
+        headers0_s = [str(h or "").strip() for h in headers0]
+        n = len(headers0_s)
+
+        def _is_num(s: str) -> bool:
+            t = (s or "").strip()
+            if not t:
+                return False
+            if re.search(r"\d", t) is None:
+                return False
+            if re.search(
+                r"\b(UNIT|LOT|COLOU?R|TOTAL|LOGISTIC|DELIVERY|INCOTERM|FROM|HANDOVER|TRANSPORT|PRESENTATION|COST|PRICE)\b",
+                t,
+                flags=re.IGNORECASE,
+            ):
+                return False
+            return True
+
+        def _is_text(s: str) -> bool:
+            t = (s or "").strip()
+            if not t:
+                return False
+            if re.search(r"\d", t) is not None and re.fullmatch(r"[\d,\.]+", t):
+                return False
+            return True
+
+        col_numeric = [0] * n
+        col_text = [0] * n
+        for r in rows0:
+            if not isinstance(r, dict):
+                continue
+            for i, hk in enumerate(headers0_s):
+                v = str(r.get(hk, "") or "")
+                if _is_num(v):
+                    col_numeric[i] += 1
+                if _is_text(v):
+                    col_text[i] += 1
+
+        def _find_header_idx(pat: str) -> Optional[int]:
+            for i, h in enumerate(headers0_s):
+                if re.search(pat, h, flags=re.IGNORECASE):
+                    return i
+            return None
+
+        idx_colour = _find_header_idx(r"\bCOLOU?R\b")
+        idx_xs = _find_header_idx(r"\bXS\b")
+        idx_s = _find_header_idx(r"\bS\b")
+        idx_m = _find_header_idx(r"\bM\b")
+        idx_l = _find_header_idx(r"\bL\b")
+        idx_xl = _find_header_idx(r"\bXL\b")
+        idx_total = _find_header_idx(r"\bTOTAL\b")
+        if idx_l is None:
+            for i, h in enumerate(headers0_s):
+                if h.strip() == "1" and col_numeric[i] > 0:
+                    idx_l = i
+                    break
+
+        def _shift_to_data(i: Optional[int], kind: str) -> Optional[int]:
+            if i is None:
+                return None
+            if kind == "colour":
+                if col_text[i] == 0 and i > 0 and col_text[i - 1] > 0:
+                    return i - 1
+                return i
+            if col_numeric[i] == 0 and (i + 1) < n and col_numeric[i + 1] > 0:
+                return i + 1
+            return i
+
+        idx_colour = _shift_to_data(idx_colour, "colour")
+        idx_xs = _shift_to_data(idx_xs, "num")
+        idx_s = _shift_to_data(idx_s, "num")
+        idx_m = _shift_to_data(idx_m, "num")
+        idx_l = _shift_to_data(idx_l, "num")
+        idx_xl = _shift_to_data(idx_xl, "num")
+        idx_total = _shift_to_data(idx_total, "num")
+
+        chosen = [i for i in [idx_colour, idx_xs, idx_s, idx_m, idx_l, idx_xl, idx_total] if isinstance(i, int)]
+        if idx_colour is not None and idx_total is not None:
+            numeric_between = [
+                i
+                for i in range(idx_colour + 1, idx_total)
+                if col_numeric[i] > 0 and i not in chosen
+            ]
+        else:
+            numeric_between = [i for i in range(n) if col_numeric[i] > 0 and i not in chosen]
+        numeric_between = sorted(numeric_between)
+
+        def _fill_if_none(cur: Optional[int]) -> Optional[int]:
+            if cur is not None:
+                return cur
+            if numeric_between:
+                return numeric_between.pop(0)
+            return None
+
+        idx_xs = _fill_if_none(idx_xs)
+        idx_s = _fill_if_none(idx_s)
+        idx_m = _fill_if_none(idx_m)
+        idx_l = _fill_if_none(idx_l)
+        idx_xl = _fill_if_none(idx_xl)
+
+        if not (idx_colour is not None and idx_xs is not None and idx_total is not None):
+            return
+
+        canonical = [
+            ("COLOUR", idx_colour),
+            ("XS", idx_xs),
+            ("S", idx_s),
+            ("M", idx_m),
+            ("L", idx_l),
+            ("XL", idx_xl),
+            ("Total", idx_total),
+        ]
+
+        new_headers = [h for h, oi in canonical if oi is not None]
+        new_rows: List[Dict[str, str]] = []
+        for r in rows0:
+            if not isinstance(r, dict):
+                continue
+            nr: Dict[str, str] = {}
+            for nh, oi in canonical:
+                if oi is None:
+                    continue
+                ok = headers0_s[int(oi)]
+                nr[nh] = str(r.get(ok, "") or "")
+            if any((v or "").strip() for v in nr.values()):
+                new_rows.append(nr)
+
+        if new_rows:
+            reco["headers"] = new_headers
+            reco["rows"] = new_rows
+            reco["row_count"] = len(new_rows)
+            reco["column_count"] = len(new_headers)
+    except Exception:
+        return
+
+
+def _extract_total_order_grid_from_boxes(boxes: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(boxes, list) or len(boxes) < 8:
+        return None
+
+    def _t(s: Any) -> str:
+        return str(s or "").strip()
+
+    # find title "TOTAL ORDER" to anchor the region
+    title_y: Optional[float] = None
+    for b in boxes:
+        txt = _t(b.get("text"))
+        if not txt:
+            continue
+        if re.search(r"\bTOTAL\s+ORDER\b", txt, flags=re.IGNORECASE):
+            try:
+                title_y = float(b.get("bbox", {}).get("y_center"))
+            except Exception:
+                title_y = None
+            if title_y is not None:
+                break
+
+    if title_y is None:
+        return None
+
+    # take content below the title within a bounded window
+    region = [
+        b
+        for b in boxes
+        if isinstance(b, dict)
+        and b.get("bbox") is not None
+        and float(b["bbox"]["y_center"]) >= (title_y + 5.0)
+        and float(b["bbox"]["y_center"]) <= (title_y + 520.0)
+    ]
+
+    if len(region) < 8:
+        return None
+
+    reconstructed = _reconstruct_table_from_boxes(region)
+    if reconstructed is None:
+        return None
+
+    headers = reconstructed.get("headers") or []
+    header_text = " ".join([str(h or "") for h in headers]).upper()
+    size_tokens = {"XS", "S", "M", "L", "XL", "XXL", "XXS"}
+    hits = sum(1 for t in size_tokens if re.search(r"\b" + re.escape(t) + r"\b", header_text))
+    if hits < 2:
+        # Sometimes headers are not detected; try to infer from the first row values
+        try:
+            rows0 = reconstructed.get("rows") or []
+            if isinstance(rows0, list) and rows0:
+                first_row = rows0[0]
+                if isinstance(first_row, dict):
+                    row_text = " ".join([str(v or "") for v in first_row.values()]).upper()
+                    hits = sum(1 for t in size_tokens if re.search(r"\b" + re.escape(t) + r"\b", row_text))
+        except Exception:
+            pass
+    if hits < 2:
+        return None
+
+    # Strong hint: should include colour/color or total
+    if not (re.search(r"\bCOLOU?R\b", header_text) or re.search(r"\bTOTAL\b", header_text)):
+        # allow if any row contains a TOTAL marker
+        has_total_row = False
+        for r in (reconstructed.get("rows") or []):
+            if not isinstance(r, dict):
+                continue
+            rt = " ".join([str(v or "") for v in r.values()]).upper()
+            if re.search(r"\bTOTAL\b", rt):
+                has_total_row = True
+                break
+        if not has_total_row:
+            return None
+
+    # tag for debugging/selection
+    reconstructed["table_kind"] = "total_order_grid"
+    reconstructed["include_headers_in_rows_matrix"] = True
+
+    _normalize_size_grid_columns(reconstructed)
+    return reconstructed
+
+
+def _extract_partial_deliveries_grids_from_boxes(boxes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(boxes, list) or len(boxes) < 12:
+        return []
+
+    def _t(s: Any) -> str:
+        return str(s or "").strip()
+
+    anchors: List[float] = []
+    for b in boxes:
+        txt = _t(b.get("text"))
+        if not txt:
+            continue
+        if re.search(r"\bLOGISTIC\s+ORDER\b", txt, flags=re.IGNORECASE):
+            try:
+                anchors.append(float(b.get("bbox", {}).get("y_center")))
+            except Exception:
+                pass
+
+    anchors = sorted(list({a for a in anchors if isinstance(a, (int, float))}))
+    if not anchors:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for i, y0 in enumerate(anchors):
+        y1 = anchors[i + 1] if (i + 1) < len(anchors) else (y0 + 900.0)
+        region = [
+            b
+            for b in boxes
+            if isinstance(b, dict)
+            and b.get("bbox") is not None
+            and float(b["bbox"]["y_center"]) >= (y0 - 10.0)
+            and float(b["bbox"]["y_center"]) <= (y1 - 10.0)
+        ]
+        if len(region) < 12:
+            continue
+
+        colour_y: Optional[float] = None
+        cost_y: Optional[float] = None
+        for b in region:
+            txt = _t(b.get("text"))
+            if not txt:
+                continue
+            if colour_y is None and re.search(r"\bCOLOU?R\b", txt, flags=re.IGNORECASE):
+                try:
+                    colour_y = float(b.get("bbox", {}).get("y_center"))
+                except Exception:
+                    colour_y = None
+            if cost_y is None and re.search(r"\bCOST\s*PRICE\b", txt, flags=re.IGNORECASE):
+                try:
+                    cost_y = float(b.get("bbox", {}).get("y_center"))
+                except Exception:
+                    cost_y = None
+
+        if colour_y is None:
+            continue
+        y_bottom = (cost_y - 5.0) if isinstance(cost_y, (int, float)) else (y1 - 10.0)
+        grid_region = [
+            b
+            for b in region
+            if float(b["bbox"]["y_center"]) >= (colour_y - 10.0) and float(b["bbox"]["y_center"]) <= y_bottom
+        ]
+        if len(grid_region) < 10:
+            continue
+
+        reconstructed = _reconstruct_table_from_boxes(grid_region)
+        if reconstructed is None:
+            continue
+
+        headers = reconstructed.get("headers") or []
+        header_text = " ".join([str(h or "") for h in headers]).upper()
+        size_tokens = {"XS", "S", "M", "L", "XL", "XXL", "XXS"}
+        hits = sum(1 for t in size_tokens if re.search(r"\b" + re.escape(t) + r"\b", header_text))
+        if hits < 2:
+            continue
+
+        reconstructed["table_kind"] = "partial_deliveries_grid"
+        reconstructed["include_headers_in_rows_matrix"] = True
+        _normalize_size_grid_columns(reconstructed)
+        out.append(reconstructed)
+
+    return out
+
+
 def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Dict[str, Any]) -> List[Dict[str, Any]]:
     lines = page_res.get("lines") or []
     if not isinstance(lines, list) or not lines:
@@ -1215,6 +1534,23 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
     regions = _detect_table_regions(image_gray_or_bgr)
 
     tables: List[Dict[str, Any]] = []
+    try:
+        grid_tbl = _extract_total_order_grid_from_boxes(boxes)
+        if grid_tbl is not None:
+            grid_tbl["table_index"] = 900
+            grid_tbl["bbox"] = None
+            tables.append(grid_tbl)
+    except Exception:
+        pass
+    try:
+        pd_tables = _extract_partial_deliveries_grids_from_boxes(boxes)
+        if pd_tables:
+            for j, t in enumerate(pd_tables, start=1):
+                t["table_index"] = 910 + j
+                t["bbox"] = None
+                tables.append(t)
+    except Exception:
+        pass
     if regions:
         for i, r in enumerate(regions, start=1):
             rx0, ry0 = float(r["x"]), float(r["y"])
@@ -1340,15 +1676,46 @@ def _images_from_upload(filename: str, file_bytes: bytes) -> List[np.ndarray]:
     lower = filename.lower()
 
     if lower.endswith(".pdf"):
-        if convert_from_bytes is None:
-            raise RuntimeError("pdf2image is not available. Install pdf2image and poppler.")
-
-        pages = convert_from_bytes(file_bytes, dpi=250)
         images: List[np.ndarray] = []
-        for page in pages:
-            rgb = np.array(page.convert("RGB"))
-            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            images.append(bgr)
+        # Primary: pdf2image (requires Poppler)
+        if convert_from_bytes is not None:
+            try:
+                pages = convert_from_bytes(file_bytes, dpi=250)
+                for page in pages:
+                    rgb = np.array(page.convert("RGB"))
+                    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                    images.append(bgr)
+                if images:
+                    return images
+            except Exception:
+                images = []
+
+        # Fallback: PyMuPDF (no Poppler)
+        if fitz is None:
+            raise RuntimeError("Unable to rasterize PDF. Install poppler (for pdf2image) or PyMuPDF.")
+
+        try:
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            # 250dpi ~= 250/72 zoom
+            zoom = 250.0 / 72.0
+            mat = fitz.Matrix(zoom, zoom)
+            for i in range(len(doc)):
+                page = doc.load_page(i)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                img = np.frombuffer(pix.samples, dtype=np.uint8)
+                img = img.reshape((pix.height, pix.width, pix.n))
+                # pix.n should be 3 (RGB)
+                if img.ndim == 3 and img.shape[2] >= 3:
+                    rgb = img[:, :, :3]
+                else:
+                    rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                images.append(bgr)
+        except Exception as e:
+            raise RuntimeError(f"Unable to rasterize PDF via PyMuPDF: {e}")
+
+        if not images:
+            raise RuntimeError("Unable to rasterize PDF pages")
         return images
 
     # image
@@ -1618,7 +1985,34 @@ def _extract_fields_from_tables(tables: List[Dict[str, Any]]) -> Dict[str, Any]:
 def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Prefer table-derived values when available (usually cleaner)
     t_fields = _extract_fields_from_text(text)
-    tbl_fields = _extract_fields_from_tables(tables)
+
+    def _looks_like_size_grid_table(t: Any) -> bool:
+        if not isinstance(t, dict):
+            return False
+        tk = str(t.get("table_kind") or "").strip().lower()
+        if tk in {"total_order_grid", "partial_deliveries_grid"}:
+            return True
+        headers = t.get("headers") or []
+        if isinstance(headers, list):
+            ht = " ".join([str(h or "") for h in headers]).upper()
+            size_tokens = {"XS", "S", "M", "L", "XL", "XXL", "XXS"}
+            hits = sum(1 for tok in size_tokens if re.search(r"\b" + re.escape(tok) + r"\b", ht))
+            if hits >= 2 and re.search(r"\bCOLOU?R\b", ht):
+                return True
+        rm = t.get("rows_matrix")
+        if isinstance(rm, list) and rm:
+            try:
+                joined = " ".join([str(x or "") for row in rm[:3] if isinstance(row, list) for x in row]).upper()
+                size_tokens = {"XS", "S", "M", "L", "XL", "XXL", "XXS"}
+                hits = sum(1 for tok in size_tokens if re.search(r"\b" + re.escape(tok) + r"\b", joined))
+                if hits >= 2 and re.search(r"\bCOLOU?R\b", joined):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    tables_for_fields = [t for t in (tables or []) if not _looks_like_size_grid_table(t)]
+    tbl_fields = _extract_fields_from_tables(tables_for_fields)
 
     merged = {**t_fields, **{k: v for k, v in tbl_fields.items() if v is not None}}
 
@@ -2620,6 +3014,265 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
         except Exception:
             pass
 
+    # TOTAL ORDER: garment size grid usually has header COLOUR + sizes (XS/S/M/L/XL) + Total
+    if _field_bad("total_order", merged.get("total_order")):
+        try:
+            def _parse_int_like(s: str) -> Optional[int]:
+                v = (s or "").strip()
+                if not v:
+                    return None
+                v = v.replace(" ", "")
+                # Accept thousands separators
+                v = v.replace(".", "")
+                v = v.replace(",", "")
+                if not re.fullmatch(r"\d{1,12}", v):
+                    return None
+                try:
+                    return int(v)
+                except Exception:
+                    return None
+
+            def _format_int(n: int) -> str:
+                try:
+                    return f"{int(n):,}"
+                except Exception:
+                    return str(n)
+
+            def _is_total_order_grid(rm: Any) -> bool:
+                if not isinstance(rm, list) or not rm:
+                    return False
+                size_tokens = {"XS", "S", "M", "L", "XL", "XXL", "XXS"}
+
+                # Table may include the title "TOTAL ORDER" as its own row/cell
+                for r in rm[:8]:
+                    if not isinstance(r, list):
+                        continue
+                    row_text = " ".join([str(c or "").strip() for c in r]).upper()
+                    if "TOTAL ORDER" in row_text:
+                        return True
+
+                # Find a header row that contains size tokens; COLOUR/TOTAL may be OCR'd poorly or missing
+                for r in rm[:8]:
+                    if not isinstance(r, list):
+                        continue
+                    cells = [str(c or "").strip() for c in r]
+                    row_text = " ".join(cells).upper()
+                    hits = sum(1 for t in size_tokens if re.search(r"\b" + re.escape(t) + r"\b", row_text))
+                    has_colour = ("COLOUR" in row_text) or ("COLOR" in row_text) or ("COLO" in row_text)
+                    has_total = re.search(r"\bT\s*O?\s*T\s*A\s*L\b", row_text) is not None
+                    if hits >= 2 and (has_colour or has_total):
+                        return True
+                    # If very strong size header, accept even if colour/total not found
+                    if hits >= 3:
+                        return True
+                return False
+
+            def _extract_total_from_grid(rm: Any) -> Optional[int]:
+                if not isinstance(rm, list):
+                    return None
+                def _looks_total_word(s: str) -> bool:
+                    nk = _norm_key(s)
+                    return nk in {"total", "totai", "t0tal", "tota1", "totaiorder", "totalorder"} or nk.endswith("total")
+
+                # Prefer explicit TOTAL row last cell
+                best_last_col: List[int] = []
+                best_any_num: List[int] = []
+
+                for r in rm:
+                    if not isinstance(r, list) or not r:
+                        continue
+                    cells = [" ".join(str(c or "").split()).strip() for c in r]
+                    cells2 = [c for c in cells if c]
+                    row_text = " ".join(cells2)
+                    if not cells2:
+                        continue
+
+                    if any(_looks_total_word(c) for c in cells2[:2]) or ("TOTAL" in row_text.upper() and _looks_total_word(row_text)):
+                        n = _parse_int_like(cells2[-1])
+                        if n is not None:
+                            return n
+
+                    # collect numeric candidates from last column (robust)
+                    n2 = _parse_int_like(cells2[-1])
+                    if n2 is not None:
+                        best_last_col.append(n2)
+                    for c in cells2:
+                        n3 = _parse_int_like(c)
+                        if n3 is not None:
+                            best_any_num.append(n3)
+
+                if best_last_col:
+                    return max(best_last_col)
+                if best_any_num:
+                    return max(best_any_num)
+                return None
+
+            # Table-based
+            if isinstance(tables, list):
+                for t in tables:
+                    rm = (t or {}).get("rows_matrix") if isinstance(t, dict) else None
+                    if not _is_total_order_grid(rm):
+                        continue
+                    n = _extract_total_from_grid(rm)
+                    if n is not None:
+                        merged["total_order"] = _format_int(n)
+                        break
+
+            # Text-based fallback
+            if _field_bad("total_order", merged.get("total_order")) and isinstance(text, str) and text.strip():
+                # 1) Inline pattern: TOTAL ORDER 27,800
+                m = re.search(r"\btotal\s*order\b\s*[:\-]?\s*([0-9][0-9\.,]{2,})", text, flags=re.IGNORECASE)
+                if m:
+                    n = _parse_int_like(m.group(1) or "")
+                    if n is not None:
+                        merged["total_order"] = _format_int(n)
+
+                # 2) Window scan: if PP-Structure didn't return the grid as table, the numbers may still appear in OCR text
+                if _field_bad("total_order", merged.get("total_order")):
+                    m2 = re.search(r"\btotal\s*order\b", text, flags=re.IGNORECASE)
+                    if m2:
+                        win = text[m2.end() : m2.end() + 800]
+                        # Prefer window after a TOTAL row marker if present
+                        m_tot = re.search(r"\btotal\b", win, flags=re.IGNORECASE)
+                        if m_tot:
+                            win2 = win[m_tot.end() : m_tot.end() + 400]
+                        else:
+                            win2 = win
+
+                        nums: List[int] = []
+                        for tok in re.findall(r"\b\d{1,3}(?:[\.,]\d{3})+\b|\b\d{4,12}\b", win2):
+                            n3 = _parse_int_like(tok)
+                            if n3 is not None:
+                                nums.append(n3)
+                        if nums:
+                            merged["total_order"] = _format_int(max(nums))
+        except Exception:
+            pass
+
+    # CARE INSTRUCTIONS: often appears on the same line as the label, or as a 2-column row (label | value)
+    if _field_bad("care_instructions", merged.get("care_instructions")):
+        try:
+            def _format_care_info(s: str) -> str:
+                out = " ".join((s or "").replace("\r", "\n").replace("\n", " ").split()).strip()
+                out = re.sub(r"\s*\|\s*", " | ", out)
+                out = re.sub(r"\s*,\s*", ", ", out)
+                return out.strip(" ,")
+
+            # 1) Text: inline value after label
+            if isinstance(text, str) and text.strip():
+                m = re.search(
+                    r"\bcare\s*instructions\b\s*[:\-]?\s*(.+)$",
+                    text,
+                    flags=re.IGNORECASE | re.MULTILINE,
+                )
+                if m:
+                    v = _format_care_info(m.group(1) or "")
+                    if v and len(v) >= 6 and _field_bad("care_instructions", merged.get("care_instructions")):
+                        merged["care_instructions"] = v
+
+                # Sometimes OCR puts the label on its own line then the value on the next line
+                if _field_bad("care_instructions", merged.get("care_instructions")):
+                    lines_ci = [ln.strip() for ln in text.replace("\r", "\n").split("\n")]
+                    for i, ln in enumerate(lines_ci):
+                        if re.search(r"\bcare\s*instructions\b", ln, flags=re.IGNORECASE):
+                            tail = re.sub(r"(?i).*\bcare\s*instructions\b\s*[:\-]?", "", ln).strip()
+                            parts: List[str] = []
+                            if tail:
+                                parts.append(tail)
+                            for j in range(i + 1, min(len(lines_ci), i + 8)):
+                                nxt = (lines_ci[j] or "").strip()
+                                if not nxt:
+                                    if parts:
+                                        break
+                                    continue
+                                # stop if next label starts
+                                if re.search(
+                                    r"\b(COMPOSITIONS\s+INFORMATION|HANGTAG\s+LABEL|MAIN\s+LABEL|EXTERNAL\s+FABRIC|HANGING|TOTAL\s+ORDER|ORDER\-?NR|DATE|SUPPLIER|ARTICLE|DESCRIPTION|MARKET\s+OF\s+ORIGIN|PVP)\b",
+                                    nxt,
+                                    flags=re.IGNORECASE,
+                                ) is not None:
+                                    break
+                                parts.append(nxt)
+                            vv = _format_care_info(" ".join(parts))
+                            if vv and len(vv) >= 6:
+                                merged["care_instructions"] = vv
+                            break
+
+            # 2) Tables: detect CARE INSTRUCTIONS cell and read adjacent / following rows
+            if _field_bad("care_instructions", merged.get("care_instructions")) and isinstance(tables, list):
+                def _is_stop_cell(s: str) -> bool:
+                    return re.search(
+                        r"\b(COMPOSITIONS\s+INFORMATION|HANGTAG\s+LABEL|MAIN\s+LABEL|EXTERNAL\s+FABRIC|HANGING|TOTAL\s+ORDER|ORDER\-?NR|DATE|SUPPLIER|ARTICLE|DESCRIPTION|MARKET\s+OF\s+ORIGIN|PVP)\b",
+                        s or "",
+                        flags=re.IGNORECASE,
+                    ) is not None
+
+                for t in tables:
+                    rm = (t or {}).get("rows_matrix") if isinstance(t, dict) else None
+                    if not isinstance(rm, list):
+                        continue
+                    for ridx, r in enumerate(rm):
+                        if not isinstance(r, list) or not r:
+                            continue
+                        cells = [" ".join(str(c or "").split()).strip() for c in r]
+                        # find label cell index
+                        cidx = None
+                        for ii, c in enumerate(cells):
+                            if re.search(r"\bcare\s*instructions\b", c or "", flags=re.IGNORECASE):
+                                cidx = ii
+                                break
+                        if cidx is None:
+                            continue
+
+                        parts: List[str] = []
+                        # same-row tail after label
+                        tail = re.sub(r"(?i).*\bcare\s*instructions\b\s*[:\-]?", "", cells[cidx] or "").strip()
+                        if tail:
+                            parts.append(tail)
+
+                        # same row: collect other non-empty cells (likely value column)
+                        for ii, c in enumerate(cells):
+                            if ii == cidx:
+                                continue
+                            if not c:
+                                continue
+                            if _is_stop_cell(c):
+                                continue
+                            parts.append(c)
+
+                        # following rows: often the value continues beneath the value column
+                        for rr in range(ridx + 1, min(len(rm), ridx + 6)):
+                            nr = rm[rr]
+                            if not isinstance(nr, list):
+                                break
+                            ncells = [" ".join(str(c or "").split()).strip() for c in nr]
+                            row_text = " ".join([c for c in ncells if c])
+                            if not row_text:
+                                if parts:
+                                    break
+                                continue
+                            if _is_stop_cell(row_text):
+                                break
+                            if re.search(r"\bcare\s*instructions\b", row_text, flags=re.IGNORECASE):
+                                continue
+                            # take value-column cell if available else whole row
+                            vv = ""
+                            if cidx < len(ncells):
+                                vv = (ncells[cidx] or "").strip()
+                            if not vv:
+                                vv = row_text
+                            if vv and not _is_stop_cell(vv):
+                                parts.append(vv)
+
+                        vv2 = _format_care_info(" ".join([p for p in parts if p]).strip())
+                        if vv2 and len(vv2) >= 6:
+                            merged["care_instructions"] = vv2
+                            break
+                    if not _field_bad("care_instructions", merged.get("care_instructions")):
+                        break
+        except Exception:
+            pass
+
     # Final normalization: ensure compositions_information is comma-separated for downstream parsing
     if isinstance(merged.get("compositions_information"), str):
         try:
@@ -2791,7 +3444,9 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     if filename.lower().endswith(".pdf"):
         pages_text = _pdf_text_pages(file_bytes)
         joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
-        if joined and len(joined) >= 50:
+        # Only use embedded-text shortcut when a non-paddle engine is requested.
+        # For paddle-based engines we must rasterize pages to enable bbox/table reconstruction (e.g., TOTAL ORDER size grid).
+        if joined and len(joined) >= 50 and engine not in ("paddle", "paddle_structure", "paddle_ensemble"):
             t_pdf = time.perf_counter()
             all_pages: List[Dict[str, Any]] = []
             combined_texts: List[str] = []
@@ -3180,7 +3835,9 @@ async def ocr_extract(
     if filename.lower().endswith(".pdf"):
         pages_text = _pdf_text_pages(file_bytes)
         joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
-        if joined and len(joined) >= 50:
+        # Only use embedded-text shortcut when a non-paddle engine is requested.
+        # For paddle-based engines we must rasterize pages to enable bbox/table reconstruction (e.g., TOTAL ORDER size grid).
+        if joined and len(joined) >= 50 and engine not in ("paddle", "paddle_structure", "paddle_ensemble"):
             all_pages: List[Dict[str, Any]] = []
             combined_texts: List[str] = []
             for i, t in enumerate(pages_text or [], start=1):
