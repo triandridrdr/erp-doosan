@@ -2186,15 +2186,26 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                                 unit_lot = v
                                 break
                         continue
+
+                    xs_v = str(r.get("XS") or "").strip()
+                    s_v = str(r.get("S") or "").strip()
+                    m_v = str(r.get("M") or "").strip()
+                    l_v = str(r.get("L") or "").strip()
+                    xl_v = str(r.get("XL") or "").strip()
+                    tot_v = str(r.get("Total") or r.get("TOTAL") or "").strip()
+
+                    # Drop noise rows (commonly from UNIT LOT value splitting into COLOUR column)
+                    if re.fullmatch(r"\d{1,6}", colour or "") and not any([xs_v, s_v, m_v, l_v, xl_v, tot_v]):
+                        continue
                     grid_out.append(
                         {
                             "colour": colour,
-                            "xs": str(r.get("XS") or "").strip(),
-                            "s": str(r.get("S") or "").strip(),
-                            "m": str(r.get("M") or "").strip(),
-                            "l": str(r.get("L") or "").strip(),
-                            "xl": str(r.get("XL") or "").strip(),
-                            "total": str(r.get("Total") or r.get("TOTAL") or "").strip(),
+                            "xs": xs_v,
+                            "s": s_v,
+                            "m": m_v,
+                            "l": l_v,
+                            "xl": xl_v,
+                            "total": tot_v,
                         }
                     )
                 payload["total_order"]["grid"] = grid_out
@@ -2261,7 +2272,17 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                         inferred = _infer_colour_from_row(r)
                         if inferred:
                             c0 = inferred
+
                     v0 = str(r.get("XS") or "").strip()
+                    s0 = str(r.get("S") or "").strip()
+                    m0 = str(r.get("M") or "").strip()
+                    l0 = str(r.get("L") or "").strip()
+                    xl0 = str(r.get("XL") or "").strip()
+                    t0 = str(r.get("Total") or r.get("TOTAL") or "").strip()
+
+                    # Drop noise rows (e.g. "1" row with empty quantities)
+                    if re.fullmatch(r"\d{1,6}", c0 or "") and not any([v0, s0, m0, l0, xl0, t0]):
+                        continue
                     if c0 and v0:
                         _consume_meta_row(c0, v0)
                     if re.search(r"\bCOST\s*PRICE\b", c0, flags=re.IGNORECASE):
@@ -2275,12 +2296,12 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                         {
                             "delivery_seq": delivery_seq,
                             "colour": c0,
-                            "xs": str(r.get("XS") or "").strip(),
-                            "s": str(r.get("S") or "").strip(),
-                            "m": str(r.get("M") or "").strip(),
-                            "l": str(r.get("L") or "").strip(),
-                            "xl": str(r.get("XL") or "").strip(),
-                            "total": str(r.get("Total") or r.get("TOTAL") or "").strip(),
+                            "xs": v0,
+                            "s": s0,
+                            "m": m0,
+                            "l": l0,
+                            "xl": xl0,
+                            "total": t0,
                         }
                     )
 
