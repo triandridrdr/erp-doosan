@@ -1873,6 +1873,51 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
         except Exception:
             pass
         return False
+
+    def _is_image_desc_table(t: Any) -> bool:
+        if not isinstance(t, dict):
+            return False
+        tk = str(t.get("table_kind") or "").strip().lower()
+        if tk in {"total_order_grid", "partial_deliveries_grid"}:
+            return False
+        try:
+            headers = t.get("headers") or []
+            header_text = " ".join([str(h or "") for h in headers]).upper()
+        except Exception:
+            header_text = ""
+
+        try:
+            rm = t.get("rows_matrix") or []
+            if isinstance(rm, list) and rm:
+                head = " ".join([str(x or "") for row in rm[:6] if isinstance(row, list) for x in row]).upper()
+            else:
+                head = ""
+        except Exception:
+            head = ""
+
+        blob = (header_text + " " + head).strip()
+        if not blob:
+            return False
+
+        try:
+            size_tokens = ["XS", "S", "M", "L", "XL", "XXL", "XXS"]
+            hits = sum(1 for tok in size_tokens if re.search(r"\b" + re.escape(tok) + r"\b", blob) is not None)
+            has_grid_hint = re.search(r"\bCOLOU?R\b", blob) is not None or re.search(r"\bTOTAL\b", blob) is not None
+            # Only treat it as a size grid when it clearly looks like a grid (not e.g. 'EUR/USA S MEX 26')
+            if hits >= 2 and has_grid_hint:
+                return False
+        except Exception:
+            pass
+
+        kw = re.search(
+            r"\b(IMAGE\s+AND\s+MEASURES|APPLICATION|PLACEMENT|NECKLINE|LEFT_?BACK_?NECKLINE|WASHES\s+SUPPORTED\s+BY\s+THE\s+LABEL)\b",
+            blob,
+            flags=re.IGNORECASE,
+        )
+        if kw is not None:
+            return True
+        return False
+
     if regions:
         for i, r in enumerate(regions, start=1):
             rx0, ry0 = float(r["x"]), float(r["y"])
@@ -1891,6 +1936,9 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
             if pd_tables_found and _is_partial_deliveries_like_table(reconstructed):
                 continue
 
+            if _is_image_desc_table(reconstructed):
+                continue
+
             reconstructed["table_index"] = i
             reconstructed["bbox"] = {"x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"]}
             tables.append(reconstructed)
@@ -1904,6 +1952,80 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
     reconstructed["table_index"] = 1
     reconstructed["bbox"] = None
     return [reconstructed]
+
+
+def _filter_tables_for_sales_order(tables: Any) -> Any:
+    if not isinstance(tables, list):
+        return tables
+
+    def _looks_like_image_desc(t: Any) -> bool:
+        if not isinstance(t, dict):
+            return False
+        tk = str(t.get("table_kind") or "").strip().lower()
+        if tk in {"total_order_grid", "partial_deliveries_grid"}:
+            return False
+        try:
+            headers = t.get("headers") or []
+            header_text = " ".join([str(h or "") for h in headers]).upper()
+        except Exception:
+            header_text = ""
+
+        try:
+            rows0 = t.get("rows") or []
+            rows_head = ""
+            if isinstance(rows0, list) and rows0:
+                parts: List[str] = []
+                for rr in rows0[:8]:
+                    if isinstance(rr, dict):
+                        for vv in rr.values():
+                            s = str(vv or "").strip()
+                            if s:
+                                parts.append(s)
+                    elif isinstance(rr, list):
+                        for vv in rr:
+                            s = str(vv or "").strip()
+                            if s:
+                                parts.append(s)
+                    else:
+                        s = str(rr or "").strip()
+                        if s:
+                            parts.append(s)
+                rows_head = " ".join(parts).upper()
+        except Exception:
+            rows_head = ""
+        try:
+            rm = t.get("rows_matrix") or []
+            if isinstance(rm, list) and rm:
+                head = " ".join([str(x or "") for row in rm[:8] if isinstance(row, list) for x in row]).upper()
+            else:
+                head = ""
+        except Exception:
+            head = ""
+
+        blob = (header_text + " " + rows_head + " " + head).strip()
+        if not blob:
+            return False
+
+        # Don't remove size grids; be strict to avoid false negatives on strings like 'EUR/USA S MEX 26'
+        try:
+            size_tokens = ["XS", "S", "M", "L", "XL", "XXL", "XXS"]
+            hits = sum(1 for tok in size_tokens if re.search(r"\b" + re.escape(tok) + r"\b", blob) is not None)
+            has_grid_hint = re.search(r"\bCOLOU?R\b", blob) is not None or re.search(r"\bTOTAL\b", blob) is not None
+            if hits >= 2 and has_grid_hint:
+                return False
+        except Exception:
+            pass
+
+        return (
+            re.search(
+                r"\b(IMAGE\s+AND\s+MEASURES|APPLICATION|PLACEMENT|NECKLINE|LEFT_?BACK_?NECKLINE|WASHES\s+SUPPORTED\s+BY\s+THE\s+LABEL)\b",
+                blob,
+                flags=re.IGNORECASE,
+            )
+            is not None
+        )
+
+    return [t for t in tables if not _looks_like_image_desc(t)]
 
 
 def _ensure_bgr(image: np.ndarray) -> np.ndarray:
@@ -4429,7 +4551,9 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             pass
 
         if isinstance(page_res.get("tables"), list):
+            page_res["tables"] = _filter_tables_for_sales_order(page_res.get("tables") or [])
             page_res["tables"] = [_table_add_rows_matrix(t) for t in (page_res.get("tables") or [])]
+            page_res["tables"] = _filter_tables_for_sales_order(page_res.get("tables") or [])
 
         try:
             if isinstance(page_res.get("fields"), dict):
@@ -4859,7 +4983,9 @@ async def ocr_extract(
                 page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
 
             if isinstance(page_res.get("tables"), list):
+                page_res["tables"] = _filter_tables_for_sales_order(page_res.get("tables") or [])
                 page_res["tables"] = [_table_add_rows_matrix(t) for t in (page_res.get("tables") or [])]
+                page_res["tables"] = _filter_tables_for_sales_order(page_res.get("tables") or [])
 
             try:
                 if isinstance(page_res.get("fields"), dict):
