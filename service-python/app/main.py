@@ -514,9 +514,28 @@ def _table_add_rows_matrix(tbl: Any) -> Any:
 
     if tbl.get("include_headers_in_rows_matrix") is True and headers_s:
         try:
-            # Avoid double-prepending if already present
-            if not rows_matrix or rows_matrix[0] != headers_s:
-                rows_matrix = [headers_s] + rows_matrix
+            pre = tbl.get("pre_rows_matrix")
+            pre_s: List[List[str]] = []
+            if isinstance(pre, list) and pre:
+                pre_s: List[List[str]] = []
+                for rr in pre:
+                    if isinstance(rr, list):
+                        pre_s.append([str(x or "") for x in rr])
+                    elif isinstance(rr, dict):
+                        pre_s.append([str(rr.get(h, "") or "") for h in headers_s])
+                    else:
+                        pre_s.append([str(rr or "")])
+                rows_matrix = pre_s + rows_matrix
+
+            # Allow placing the header after the pre-rows (metadata first, then header row)
+            if tbl.get("header_row_after_pre") is True and pre_s:
+                # Ensure we don't double-insert
+                if len(rows_matrix) < (len(pre_s) + 1) or rows_matrix[len(pre_s)] != headers_s:
+                    rows_matrix = rows_matrix[: len(pre_s)] + [headers_s] + rows_matrix[len(pre_s) :]
+            else:
+                # Default behavior: header on top
+                if not rows_matrix or rows_matrix[0] != headers_s:
+                    rows_matrix = [headers_s] + rows_matrix
         except Exception:
             pass
 
@@ -1453,6 +1472,87 @@ def _extract_total_order_grid_from_boxes(boxes: List[Dict[str, Any]]) -> Optiona
     reconstructed["include_headers_in_rows_matrix"] = True
 
     _normalize_size_grid_columns(reconstructed)
+
+    # Some documents print a footer line below the grid like "UNIT LOT 1".
+    # This often falls outside the inferred numeric columns and gets dropped during normalization.
+    try:
+        rows0 = reconstructed.get("rows") or []
+        if isinstance(rows0, list):
+            already = False
+            for r in rows0:
+                if not isinstance(r, dict):
+                    continue
+                if re.search(r"\bUNIT\s*LOT\b", str(r.get("COLOUR", "") or ""), flags=re.IGNORECASE):
+                    already = True
+                    break
+            if not already:
+                # Compute a y-tolerance based on median box height
+                hs = []
+                for b in region:
+                    try:
+                        hs.append(float((b.get("bbox") or {}).get("h") or 0.0))
+                    except Exception:
+                        pass
+                med_h = float(np.median(np.array([h for h in hs if h > 0.0]))) if any(h > 0.0 for h in hs) else 18.0
+                y_tol = max(10.0, med_h * 1.2)
+
+                label_box: Optional[Dict[str, Any]] = None
+                for b in sorted(region, key=lambda x: float((x.get("bbox") or {}).get("y_center") or 0.0), reverse=True):
+                    txt = _t(b.get("text"))
+                    if not txt:
+                        continue
+                    if re.search(r"\bUNIT\s*LOT\b", txt, flags=re.IGNORECASE):
+                        label_box = b
+                        break
+
+                if label_box is not None:
+                    lx = float(label_box.get("bbox", {}).get("x_center") or 0.0)
+                    ly = float(label_box.get("bbox", {}).get("y_center") or 0.0)
+
+                    def _is_lot_val(s: str) -> bool:
+                        t2 = (s or "").strip()
+                        if not t2:
+                            return False
+                        t2 = re.sub(r"[^0-9]", "", t2)
+                        return bool(re.fullmatch(r"\d{1,6}", t2))
+
+                    val_box: Optional[Dict[str, Any]] = None
+                    for b in region:
+                        if not isinstance(b, dict) or b.get("bbox") is None:
+                            continue
+                        by = float(b.get("bbox", {}).get("y_center") or 0.0)
+                        if abs(by - ly) > y_tol:
+                            continue
+                        bx = float(b.get("bbox", {}).get("x_center") or 0.0)
+                        if bx <= lx:
+                            continue
+                        txt = _t(b.get("text"))
+                        if _is_lot_val(txt):
+                            if val_box is None or bx < float(val_box.get("bbox", {}).get("x_center") or 0.0):
+                                val_box = b
+
+                    if val_box is not None:
+                        v_raw = _t(val_box.get("text"))
+                        v_norm = re.sub(r"[^0-9]", "", v_raw)
+                        unit_row: Dict[str, str] = {h: "" for h in (reconstructed.get("headers") or [])}
+                        # Best-effort mapping into existing canonical columns
+                        if "COLOUR" in unit_row:
+                            unit_row["COLOUR"] = "UNIT LOT"
+                        else:
+                            unit_row[str((reconstructed.get("headers") or ["COLOUR"])[0])] = "UNIT LOT"
+                        if "XS" in unit_row:
+                            unit_row["XS"] = v_norm
+                        else:
+                            # fallback: place into first non-COLOUR column
+                            for h in (reconstructed.get("headers") or []):
+                                if str(h).strip().upper() != "COLOUR":
+                                    unit_row[str(h)] = v_norm
+                                    break
+                        rows0.append(unit_row)
+                        reconstructed["rows"] = rows0
+                        reconstructed["row_count"] = len(rows0)
+    except Exception:
+        pass
     return reconstructed
 
 
@@ -1534,6 +1634,174 @@ def _extract_partial_deliveries_grids_from_boxes(boxes: List[Dict[str, Any]]) ->
         reconstructed["table_kind"] = "partial_deliveries_grid"
         reconstructed["include_headers_in_rows_matrix"] = True
         _normalize_size_grid_columns(reconstructed)
+
+        # Attach delivery header metadata (printed above the grid) as extra rows so UI can display it.
+        try:
+            rows0 = reconstructed.get("rows") or []
+            headers = reconstructed.get("headers") or []
+            if isinstance(rows0, list) and isinstance(headers, list) and headers:
+                meta_specs = [
+                    ("LOGISTIC ORDER", r"\bLOGISTIC\s+ORDER\b"),
+                    ("DELIVERY", r"\bDELIVERY\b"),
+                    ("INCOTERM", r"\bINCOTERM\b"),
+                    ("FROM", r"\bFROM\b"),
+                    ("HANDOVER DATE", r"\bHANDOVER\s+DATE\b"),
+                    ("TRANSPORT MODE", r"\bTRANSPORT\s+MODE\b"),
+                    ("PRESENTATION TYPE", r"\bPRESENTATION\s+TYPE\b"),
+                ]
+
+                # prevent duplicates when rerunning / merging
+                existing_keys = set()
+                for r in rows0:
+                    if isinstance(r, dict):
+                        existing_keys.add(str(r.get("COLOUR", "") or "").strip().upper())
+
+                # collect label boxes within header band above the COLOUR header
+                header_band = [
+                    b
+                    for b in region
+                    if isinstance(b, dict)
+                    and b.get("bbox") is not None
+                    and float(b["bbox"]["y_center"]) < (colour_y - 12.0)
+                ]
+
+                def _pick_value_below(lbl_box: Dict[str, Any]) -> Optional[str]:
+                    try:
+                        lx = float(lbl_box.get("bbox", {}).get("x_center") or 0.0)
+                        ly = float(lbl_box.get("bbox", {}).get("y_center") or 0.0)
+                    except Exception:
+                        return None
+
+                    best: Optional[Dict[str, Any]] = None
+                    best_score: float = 1e18
+                    for bb in header_band:
+                        if not isinstance(bb, dict) or bb.get("bbox") is None:
+                            continue
+                        try:
+                            by = float(bb["bbox"]["y_center"])
+                            bx = float(bb["bbox"]["x_center"])
+                        except Exception:
+                            continue
+                        if by <= ly:
+                            continue
+                        # keep the value close vertically and roughly same column
+                        dx = abs(bx - lx)
+                        dy = by - ly
+                        if dx > 140.0:
+                            continue
+                        if dy > 140.0:
+                            continue
+                        txt2 = _t(bb.get("text"))
+                        if not txt2:
+                            continue
+                        if re.search(r"\b(LOGISTIC\s+ORDER|DELIVERY|INCOTERM|FROM|HANDOVER\s+DATE|TRANSPORT\s+MODE|PRESENTATION\s+TYPE)\b", txt2, flags=re.IGNORECASE):
+                            continue
+                        score = dy * 2.0 + dx
+                        if best is None or score < best_score:
+                            best = bb
+                            best_score = score
+                    if best is None:
+                        return None
+                    return _t(best.get("text"))
+
+                pre_rows: List[List[str]] = []
+
+                for key, pat in meta_specs:
+                    if key.upper() in existing_keys:
+                        continue
+                    lbl: Optional[Dict[str, Any]] = None
+                    for b in header_band:
+                        txt = _t(b.get("text"))
+                        if txt and re.search(pat, txt, flags=re.IGNORECASE):
+                            lbl = b
+                            break
+                    if lbl is None:
+                        continue
+                    val = _pick_value_below(lbl)
+                    if not val:
+                        continue
+
+                    # Store as pre-rows so it renders BEFORE the header row in rows_matrix
+                    row_list = ["" for _ in headers]
+                    try:
+                        idx_c = next((ii for ii, hh in enumerate(headers) if str(hh).strip().upper() == "COLOUR"), 0)
+                    except Exception:
+                        idx_c = 0
+                    row_list[idx_c] = key
+                    # Put value into XS column if exists else first non-colour column
+                    idx_v: Optional[int] = None
+                    for ii, hh in enumerate(headers):
+                        if str(hh).strip().upper() == "XS":
+                            idx_v = ii
+                            break
+                    if idx_v is None:
+                        for ii, hh in enumerate(headers):
+                            if str(hh).strip().upper() != "COLOUR":
+                                idx_v = ii
+                                break
+                    if idx_v is not None:
+                        row_list[int(idx_v)] = val
+                    pre_rows.append(row_list)
+
+                if pre_rows:
+                    reconstructed["pre_rows_matrix"] = pre_rows
+                    reconstructed["header_row_after_pre"] = True
+        except Exception:
+            pass
+
+        # Attach COST PRICE (printed below the grid) as an extra row so UI can display it.
+        try:
+            rows0 = reconstructed.get("rows") or []
+            if isinstance(rows0, list):
+                already_cp = False
+                for r in rows0:
+                    if not isinstance(r, dict):
+                        continue
+                    if re.search(r"\bCOST\s*PRICE\b", str(r.get("COLOUR", "") or ""), flags=re.IGNORECASE):
+                        already_cp = True
+                        break
+
+                if not already_cp:
+                    cp_text: Optional[str] = None
+                    for b in region:
+                        txt = _t(b.get("text"))
+                        if not txt:
+                            continue
+                        if re.search(r"\bCOST\s*PRICE\b", txt, flags=re.IGNORECASE):
+                            cp_text = txt
+                            break
+
+                    if cp_text:
+                        mcp = re.search(
+                            r"\bCOST\s*PRICE\b\s*[:\-]?\s*(\d+(?:[\.,]\d{1,2})?)\s*\b(EUR|USD|GBP)\b",
+                            cp_text,
+                            flags=re.IGNORECASE,
+                        )
+                        if mcp:
+                            amt = (mcp.group(1) or "").replace(",", ".").strip()
+                            ccy = (mcp.group(2) or "").upper().strip()
+                            cp_val = f"{amt} {ccy}".strip()
+                            if cp_val:
+                                headers = reconstructed.get("headers") or []
+                                cp_row: Dict[str, str] = {h: "" for h in headers} if isinstance(headers, list) else {}
+                                if "COLOUR" in cp_row:
+                                    cp_row["COLOUR"] = "COST PRICE"
+                                elif isinstance(headers, list) and headers:
+                                    cp_row[str(headers[0])] = "COST PRICE"
+
+                                if "XS" in cp_row:
+                                    cp_row["XS"] = cp_val
+                                elif isinstance(headers, list):
+                                    for h in headers:
+                                        if str(h).strip().upper() != "COLOUR":
+                                            cp_row[str(h)] = cp_val
+                                            break
+                                if cp_row and any((v or "").strip() for v in cp_row.values()):
+                                    rows0.append(cp_row)
+                                    reconstructed["rows"] = rows0
+                                    reconstructed["row_count"] = len(rows0)
+        except Exception:
+            pass
         out.append(reconstructed)
 
     return out
