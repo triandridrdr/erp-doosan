@@ -1288,6 +1288,35 @@ def _normalize_size_grid_columns(reco: Dict[str, Any]) -> None:
                     idx_l = i
                     break
 
+        # Some extractions mis-detect the COLOUR header or map it to the wrong column.
+        # Infer the COLOUR column by scoring which column contains colour-like strings
+        # (e.g. '800 - BLACK') while being text-heavy.
+        try:
+            colour_pat = re.compile(r"\b\d{2,6}\s*[-–—]\s*[A-Z][A-Z0-9\s/]*\b", flags=re.IGNORECASE)
+            best_idx: Optional[int] = None
+            best_score: float = -1.0
+            for i, hk in enumerate(headers0_s):
+                if col_text[i] <= 0:
+                    continue
+                hits = 0
+                for r in rows0:
+                    if not isinstance(r, dict):
+                        continue
+                    s = str(r.get(hk, "") or "").strip()
+                    if not s:
+                        continue
+                    if colour_pat.search(s) is not None:
+                        hits += 1
+                # Prefer columns with more matches and that appear left-most (small i).
+                score = float(hits) * 10.0 + float(col_text[i]) - float(i) * 0.1
+                if hits > 0 and score > best_score:
+                    best_score = score
+                    best_idx = i
+            if best_idx is not None and (idx_colour is None or col_text[int(idx_colour)] == 0):
+                idx_colour = best_idx
+        except Exception:
+            pass
+
         def _shift_to_data(i: Optional[int], kind: str) -> Optional[int]:
             if i is None:
                 return None
@@ -1373,6 +1402,10 @@ def _normalize_size_grid_columns(reco: Dict[str, Any]) -> None:
 
         new_headers = [h for h, oi in canonical if oi is not None]
         new_rows: List[Dict[str, str]] = []
+        colour_pat_fallback = re.compile(
+            r"\b(\d{2,6})\s*(?:[-–—]\s*)?([A-Z][A-Z0-9\s/]+?)\b",
+            flags=re.IGNORECASE,
+        )
         for r in rows0:
             if not isinstance(r, dict):
                 continue
@@ -1382,6 +1415,19 @@ def _normalize_size_grid_columns(reco: Dict[str, Any]) -> None:
                     continue
                 ok = headers0_s[int(oi)]
                 nr[nh] = str(r.get(ok, "") or "")
+            try:
+                if (nr.get("COLOUR") or "").strip() == "":
+                    blob = " ".join([str(v or "").strip() for v in r.values() if str(v or "").strip()])
+                    blob = re.sub(r"\s+", " ", blob).strip()
+                    if blob and re.search(r"\bUNIT\s*LOT\b", blob, flags=re.IGNORECASE) is None:
+                        m = colour_pat_fallback.search(blob)
+                        if m:
+                            code = (m.group(1) or "").strip()
+                            name = (m.group(2) or "").strip()
+                            if code and name and re.search(r"\bTOTAL\b", name, flags=re.IGNORECASE) is None:
+                                nr["COLOUR"] = f"{code} - {name}"
+            except Exception:
+                pass
             if any((v or "").strip() for v in nr.values()):
                 new_rows.append(nr)
 
@@ -2038,6 +2084,42 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
     if not isinstance(tables, list):
         return payload
 
+    def _infer_colour_from_row(row: Dict[str, Any]) -> str:
+        try:
+            vals: List[str] = []
+            for v in (row or {}).values():
+                s = str(v or "").strip()
+                if s:
+                    vals.append(s)
+            if not vals:
+                return ""
+
+            # Join all cells so we can detect colour even if OCR split it across columns
+            blob = " ".join(vals)
+            blob = re.sub(r"\s+", " ", blob).strip()
+            if not blob:
+                return ""
+
+            # Don't infer colour from UNIT LOT lines
+            if re.search(r"\bUNIT\s*LOT\b", blob, flags=re.IGNORECASE):
+                return ""
+
+            # Match: 800 - BLACK (support different dash characters)
+            m = re.search(
+                r"\b(\d{2,6})\s*[-–—]\s*([A-Z][A-Z0-9\s/]+?)\b",
+                blob,
+                flags=re.IGNORECASE,
+            )
+            if not m:
+                return ""
+            code = (m.group(1) or "").strip()
+            name = (m.group(2) or "").strip()
+            if not (code and name):
+                return ""
+            return f"{code} - {name}"
+        except Exception:
+            return ""
+
     # 1) Header fields from best AI table (if present)
     try:
         ai_tbl: Optional[Dict[str, Any]] = None
@@ -2084,6 +2166,18 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                     if not isinstance(r, dict):
                         continue
                     colour = str(r.get("COLOUR") or "").strip()
+
+                    # Override if empty or looks like noise and not already a valid colour/TOTAL
+                    if (
+                        not colour
+                        or (
+                            re.search(r"\bTOTAL\b", colour, flags=re.IGNORECASE) is None
+                            and re.search(r"\b\d{2,6}\s*[-–—]\s*[A-Z]", colour, flags=re.IGNORECASE) is None
+                        )
+                    ):
+                        inferred = _infer_colour_from_row(r)
+                        if inferred:
+                            colour = inferred
                     if re.search(r"\bUNIT\s*LOT\b", colour, flags=re.IGNORECASE):
                         # value usually placed into XS or first numeric col
                         for k in ["XS", "S", "M", "L", "XL", "Total"]:
@@ -2155,6 +2249,18 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                     if not isinstance(r, dict):
                         continue
                     c0 = str(r.get("COLOUR") or "").strip()
+
+                    # Override if empty or looks like noise and not already a valid colour/TOTAL
+                    if (
+                        not c0
+                        or (
+                            re.search(r"\bTOTAL\b", c0, flags=re.IGNORECASE) is None
+                            and re.search(r"\b\d{2,6}\s*[-–—]\s*[A-Z]", c0, flags=re.IGNORECASE) is None
+                        )
+                    ):
+                        inferred = _infer_colour_from_row(r)
+                        if inferred:
+                            c0 = inferred
                     v0 = str(r.get("XS") or "").strip()
                     if c0 and v0:
                         _consume_meta_row(c0, v0)
