@@ -8,22 +8,22 @@ import { AlertCircle, FileText, Loader2, Table as TableIcon, Type, Upload } from
 import { useState } from 'react';
 
 import { Button } from '../../components/ui/Button';
-import { ocrApi } from './api';
-import type { DocumentAnalysisResponseData, TableDto } from './types';
+import { ocrPythonApi } from './api';
+import type { DocumentAnalysisResponse, DocumentAnalysisResponseData, OcrResponse, TableDto } from './types';
 
 // OCR 모드 정의: 단순 추출(extract) vs 문서 분석(analyze)
 type OcrMode = 'extract' | 'analyze';
 
 type OcrApiClient = {
-  extract: (file: File) => Promise<unknown>;
-  analyze: (file: File) => Promise<unknown>;
+  extract: (file: File) => Promise<OcrResponse>;
+  analyze: (file: File) => Promise<DocumentAnalysisResponse>;
 };
 
 type OcrPageProps = {
   api?: OcrApiClient;
 };
 
-export function OcrPage({ api = ocrApi }: OcrPageProps) {
+export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   const [mode, setMode] = useState<OcrMode>('extract'); // 현재 선택된 모드
   const [selectedFile, setSelectedFile] = useState<File | null>(null); // 업로드된 파일
   const [previewUrl, setPreviewUrl] = useState<string | null>(null); // 이미지 미리보기 URL
@@ -367,6 +367,26 @@ export function OcrPage({ api = ocrApi }: OcrPageProps) {
                       {extractResult.data.averageConfidence.toFixed(1)}%
                     </span>
                   </div>
+
+                  {!!extractResult.data.salesOrderPayload && (
+                    <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
+                      <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
+                        <h3 className='font-semibold text-gray-900'>Sales Order JSON Payload</h3>
+                        <p className='text-xs text-gray-500 mt-1'>Request body for ERP insert</p>
+                      </div>
+                      <div className='p-4'>
+                        <details className='group'>
+                          <summary className='text-sm font-medium text-gray-700 cursor-pointer list-none flex items-center'>
+                            <span>View JSON</span>
+                            <span className='ml-2 transition group-open:rotate-180 text-gray-400'>▼</span>
+                          </summary>
+                          <pre className='mt-3 text-xs font-mono whitespace-pre-wrap bg-gray-50 border border-gray-200 rounded p-3 max-h-96 overflow-y-auto'>
+                            {JSON.stringify(extractResult.data.salesOrderPayload, null, 2)}
+                          </pre>
+                        </details>
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <h3 className='text-sm font-medium text-gray-700 mb-2'>Full text</h3>

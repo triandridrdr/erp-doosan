@@ -21,6 +21,9 @@ export interface OcrResponseData {
   // (Optional) Python OCR 등에서 제공될 수 있는 구조화 데이터
   tables?: TableDto[];
   formFields?: Record<string, string>;
+
+  // (Optional) ERP insert-ready Sales Order payload
+  salesOrderPayload?: unknown;
 }
 
 // OCR API 응답 구조

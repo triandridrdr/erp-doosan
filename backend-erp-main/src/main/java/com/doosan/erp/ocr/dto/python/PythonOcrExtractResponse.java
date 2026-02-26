@@ -1,6 +1,7 @@
 package com.doosan.erp.ocr.dto.python;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -21,4 +22,7 @@ public class PythonOcrExtractResponse {
 
     private JsonNode tables;
     private JsonNode fields;
+
+    @JsonProperty("sales_order_payload")
+    private JsonNode salesOrderPayload;
 }

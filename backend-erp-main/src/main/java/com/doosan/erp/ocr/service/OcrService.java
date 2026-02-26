@@ -175,6 +175,7 @@ public class OcrService {
                 .averageConfidence(averageConfidence)
                 .formFields(formFields)
                 .tables(tables)
+                .salesOrderPayload(response.getSalesOrderPayload())
                 .build();
     }
 

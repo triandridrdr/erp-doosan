@@ -2028,6 +2028,163 @@ def _filter_tables_for_sales_order(tables: Any) -> Any:
     return [t for t in tables if not _looks_like_image_desc(t)]
 
 
+def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "header": {},
+        "total_order": {"grid": [], "unit_lot": None},
+        "partial_delivery_headers": [],
+        "partial_delivery_lines": [],
+    }
+    if not isinstance(tables, list):
+        return payload
+
+    # 1) Header fields from best AI table (if present)
+    try:
+        ai_tbl: Optional[Dict[str, Any]] = None
+        for t in tables:
+            if isinstance(t, dict) and t.get("headers") == ["key", "value"]:
+                ai_tbl = t
+                break
+        if ai_tbl is not None:
+            kv_all = ai_tbl.get("kv_pairs_all")
+            if isinstance(kv_all, list):
+                for p in kv_all:
+                    if not isinstance(p, dict):
+                        continue
+                    k = str(p.get("key") or "").strip()
+                    v = str(p.get("value") or "").strip()
+                    if k:
+                        payload["header"][_norm_key(k)] = v
+            else:
+                # fallback to rows_matrix
+                rm = ai_tbl.get("rows_matrix")
+                if isinstance(rm, list):
+                    for r in rm:
+                        if not (isinstance(r, list) and len(r) >= 2):
+                            continue
+                        k = str(r[0] or "").strip()
+                        v = str(r[1] or "").strip()
+                        if k and k.lower() != "key":
+                            payload["header"][_norm_key(k)] = v
+    except Exception:
+        pass
+
+    # 2) TOTAL ORDER grid
+    try:
+        for t in tables:
+            if not isinstance(t, dict):
+                continue
+            if str(t.get("table_kind") or "").strip().lower() != "total_order_grid":
+                continue
+            rows = t.get("rows") or []
+            if isinstance(rows, list):
+                grid_out: List[Dict[str, Any]] = []
+                unit_lot: Optional[str] = None
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    colour = str(r.get("COLOUR") or "").strip()
+                    if re.search(r"\bUNIT\s*LOT\b", colour, flags=re.IGNORECASE):
+                        # value usually placed into XS or first numeric col
+                        for k in ["XS", "S", "M", "L", "XL", "Total"]:
+                            v = str(r.get(k) or "").strip()
+                            if v:
+                                unit_lot = v
+                                break
+                        continue
+                    grid_out.append(
+                        {
+                            "colour": colour,
+                            "xs": str(r.get("XS") or "").strip(),
+                            "s": str(r.get("S") or "").strip(),
+                            "m": str(r.get("M") or "").strip(),
+                            "l": str(r.get("L") or "").strip(),
+                            "xl": str(r.get("XL") or "").strip(),
+                            "total": str(r.get("Total") or r.get("TOTAL") or "").strip(),
+                        }
+                    )
+                payload["total_order"]["grid"] = grid_out
+                payload["total_order"]["unit_lot"] = unit_lot
+            break
+    except Exception:
+        pass
+
+    # 3) Partial Deliveries
+    try:
+        delivery_seq = 0
+        for t in tables:
+            if not isinstance(t, dict):
+                continue
+            if str(t.get("table_kind") or "").strip().lower() != "partial_deliveries_grid":
+                continue
+
+            delivery_seq += 1
+
+            meta: Dict[str, Any] = {
+                "delivery_seq": delivery_seq,
+                "logistic_order": None,
+                "delivery": None,
+                "incoterm": None,
+                "from": None,
+                "handover_date": None,
+                "transport_mode": None,
+                "presentation_type": None,
+                "cost_price": None,
+            }
+
+            def _consume_meta_row(label: str, val: str) -> None:
+                lk = _norm_key(label)
+                if lk in {"logistic_order", "delivery", "incoterm", "from", "handover_date", "transport_mode", "presentation_type"}:
+                    meta[lk] = val
+
+            # Metadata rows may live in pre_rows_matrix (preferred)
+            pre = t.get("pre_rows_matrix")
+            if isinstance(pre, list):
+                for r in pre:
+                    if not (isinstance(r, list) and len(r) >= 2):
+                        continue
+                    label = str(r[0] or "").strip()
+                    val = str(r[1] or "").strip()
+                    if label and val:
+                        _consume_meta_row(label, val)
+
+            # Also scan rows dicts for metadata + cost price
+            rows = t.get("rows") or []
+            if isinstance(rows, list):
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    c0 = str(r.get("COLOUR") or "").strip()
+                    v0 = str(r.get("XS") or "").strip()
+                    if c0 and v0:
+                        _consume_meta_row(c0, v0)
+                    if re.search(r"\bCOST\s*PRICE\b", c0, flags=re.IGNORECASE):
+                        meta["cost_price"] = v0 or meta.get("cost_price")
+                        continue
+                    # Only keep real grid rows
+                    if c0 and re.search(r"\b(LOGISTIC\s+ORDER|DELIVERY|INCOTERM|FROM|HANDOVER\s+DATE|TRANSPORT\s+MODE|PRESENTATION\s+TYPE)\b", c0, flags=re.IGNORECASE):
+                        continue
+
+                    payload["partial_delivery_lines"].append(
+                        {
+                            "delivery_seq": delivery_seq,
+                            "colour": c0,
+                            "xs": str(r.get("XS") or "").strip(),
+                            "s": str(r.get("S") or "").strip(),
+                            "m": str(r.get("M") or "").strip(),
+                            "l": str(r.get("L") or "").strip(),
+                            "xl": str(r.get("XL") or "").strip(),
+                            "total": str(r.get("Total") or r.get("TOTAL") or "").strip(),
+                        }
+                    )
+
+            payload["partial_delivery_headers"].append(meta)
+    except Exception:
+        pass
+
+    return payload
+
+
 def _ensure_bgr(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
         return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
@@ -4895,6 +5052,7 @@ async def ocr_extract(
                     "tables": combined_tables,
                     "fields": combined_fields,
                     "field_pairs": combined_field_pairs,
+                    "sales_order_payload": _build_sales_order_payload(combined_tables),
                 }
             )
 
@@ -5060,5 +5218,6 @@ async def ocr_extract(
             "tables": combined_tables,
             "fields": combined_fields,
             "field_pairs": combined_field_pairs,
+            "sales_order_payload": _build_sales_order_payload(combined_tables),
         }
     )

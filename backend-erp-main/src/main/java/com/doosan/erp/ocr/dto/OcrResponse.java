@@ -5,6 +5,8 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.List;
 import java.util.Map;
 
@@ -34,4 +36,7 @@ public class OcrResponse {
 
     // (Optional) 키-값 필드 (Python OCR 등에서 제공될 수 있음)
     private Map<String, String> formFields;
+
+    // (Optional) ERP insert-ready Sales Order payload from Python OCR
+    private JsonNode salesOrderPayload;
 }
