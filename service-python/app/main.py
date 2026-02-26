@@ -2080,6 +2080,24 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
         s = (str(val) if val is not None else "").strip()
         if not s:
             return True
+
+        if field in {"care_instructions"}:
+            # Reject gibberish OCR output (e.g., long runs of O/0/N) when it doesn't contain care keywords.
+            s2 = re.sub(r"\s+", " ", s).strip()
+            has_kw = re.search(
+                r"\b(HAND\s*WASH|WASH(?!ED)|BLEACH|IRON|DRY\s*CLEAN|TUMBLE\s*DRY)\b",
+                s2,
+                flags=re.IGNORECASE,
+            ) is not None
+            compact = re.sub(r"[^A-Z0-9]", "", s2.upper())
+            if not has_kw and re.search(r"(O|0|N){6,}", compact) is not None:
+                return True
+            letters = re.findall(r"[A-Z]", s2.upper())
+            if letters:
+                bad_letters = sum(1 for ch in letters if ch in {"O", "N"})
+                bad_ratio = bad_letters / max(1, len(letters))
+                if not has_kw and len(s2) >= 25 and bad_ratio >= 0.45:
+                    return True
         # Frequently swapped: a label token is used as a value
         if _norm_key(s) in {
             "date",
@@ -3390,6 +3408,62 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                 out = re.sub(r"\s*,\s*", ", ", out)
                 return out.strip(" ,")
 
+            def _format_care_join(parts: List[str]) -> str:
+                cleaned = []
+                seen = set()
+                for p in parts:
+                    pp = _format_care_info(p)
+                    if not pp:
+                        continue
+                    k = pp.upper()
+                    if k in seen:
+                        continue
+                    seen.add(k)
+                    cleaned.append(pp)
+                return " || ".join(cleaned).strip(" ,|")
+
+            def _care_keywords_hit(s: str) -> bool:
+                return (
+                    re.search(
+                        r"\b(HAND\s*WASH|WASH(?!ED)|DO\s*NOT\s*BLEACH|BLEACH|DO\s*NOT\s*IRON|IRON|DO\s*NOT\s*DRY\s*CLEAN|DRY\s*CLEAN|DO\s*NOT\s*TUMBLE\s*DRY|TUMBLE\s*DRY)\b",
+                        s or "",
+                        flags=re.IGNORECASE,
+                    )
+                    is not None
+                )
+
+            def _care_structure_hit(s: str) -> bool:
+                # Some OCR outputs keep the care format separators but lose keywords.
+                # Accept if it looks like a care list: multiple '|' separators and/or temperature patterns.
+                ss = (s or "").strip()
+                if not ss:
+                    return False
+                pipe_count = ss.count("|")
+                has_temp = re.search(r"\b\d{1,3}\s*(?:°\s*)?(?:C|F)\b", ss, flags=re.IGNORECASE) is not None
+                has_fraction = re.search(r"\b\d{1,3}\s*/\s*\d{1,3}\b", ss) is not None
+                # Require some alphabetic content to avoid taking pure noise
+                alpha = len(re.findall(r"[A-Z]", ss.upper()))
+                return (pipe_count >= 4) or (has_temp and (pipe_count >= 2 or has_fraction) and alpha >= 8)
+
+            def _care_accept(s: str) -> bool:
+                return _care_keywords_hit(s) or _care_structure_hit(s)
+
+            def _care_to_double_pipe(s: str) -> str:
+                # Convert single-pipe separated lists to the requested ' || ' format
+                raw = " ".join((s or "").replace("\r", "\n").replace("\n", " ").split()).strip()
+                raw = re.sub(r"\s*,\s*", ", ", raw)
+                raw = raw.strip(" ,")
+                if not raw:
+                    return raw
+
+                # Split on one-or-more pipes (handles both '|' and '||' from PDFs)
+                parts = [p.strip() for p in re.split(r"\s*\|+\s*", raw) if p.strip()]
+                if len(parts) >= 2:
+                    return _format_care_join(parts)
+
+                # No pipe list; keep as normalized text (but don't introduce pipe noise)
+                return raw
+
             # 1) Text: inline value after label
             if isinstance(text, str) and text.strip():
                 m = re.search(
@@ -3399,8 +3473,8 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                 )
                 if m:
                     v = _format_care_info(m.group(1) or "")
-                    if v and len(v) >= 6 and _field_bad("care_instructions", merged.get("care_instructions")):
-                        merged["care_instructions"] = v
+                    if v and len(v) >= 6 and _care_accept(v) and _field_bad("care_instructions", merged.get("care_instructions")):
+                        merged["care_instructions"] = _care_to_double_pipe(v)
 
                 # Sometimes OCR puts the label on its own line then the value on the next line
                 if _field_bad("care_instructions", merged.get("care_instructions")):
@@ -3426,8 +3500,8 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                                     break
                                 parts.append(nxt)
                             vv = _format_care_info(" ".join(parts))
-                            if vv and len(vv) >= 6:
-                                merged["care_instructions"] = vv
+                            if vv and len(vv) >= 6 and _care_accept(vv):
+                                merged["care_instructions"] = _care_to_double_pipe(vv)
                             break
 
             # 2) Tables: detect CARE INSTRUCTIONS cell and read adjacent / following rows
@@ -3497,11 +3571,48 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
                                 parts.append(vv)
 
                         vv2 = _format_care_info(" ".join([p for p in parts if p]).strip())
-                        if vv2 and len(vv2) >= 6:
-                            merged["care_instructions"] = vv2
+                        if vv2 and len(vv2) >= 6 and _care_accept(vv2):
+                            merged["care_instructions"] = _care_to_double_pipe(vv2)
                             break
                     if not _field_bad("care_instructions", merged.get("care_instructions")):
                         break
+
+            # 3) Fallback: keyword-based capture near CARE INSTRUCTIONS anchor (handles noisy inline OCR)
+            if _field_bad("care_instructions", merged.get("care_instructions")) and isinstance(text, str) and text.strip():
+                lines_ci2 = [ln.strip() for ln in text.replace("\r", "\n").split("\n")]
+                anchor_idx: Optional[int] = None
+                for i, ln in enumerate(lines_ci2):
+                    if re.search(r"\bcare\s*instructions\b", ln, flags=re.IGNORECASE):
+                        anchor_idx = i
+                        break
+
+                parts2: List[str] = []
+                if anchor_idx is not None:
+                    tail = re.sub(r"(?i).*\bcare\s*instructions\b\s*[:\-]?", "", lines_ci2[anchor_idx]).strip()
+                    if tail and _care_accept(tail):
+                        parts2.append(tail)
+                    for j in range(anchor_idx + 1, min(len(lines_ci2), anchor_idx + 25)):
+                        ln = (lines_ci2[j] or "").strip()
+                        if not ln:
+                            if parts2:
+                                break
+                            continue
+                        if re.search(
+                            r"\b(COMPOSITIONS\s+INFORMATION|HANGTAG\s+LABEL|MAIN\s+LABEL|EXTERNAL\s+FABRIC|HANGING|TOTAL\s+ORDER|ORDER\-?NR|DATE|SUPPLIER|ARTICLE|DESCRIPTION|MARKET\s+OF\s+ORIGIN|PVP)\b",
+                            ln,
+                            flags=re.IGNORECASE,
+                        ) is not None:
+                            break
+                        if _care_accept(ln) or re.search(r"\bDO\s*NOT\b", ln, flags=re.IGNORECASE) is not None:
+                            parts2.append(ln)
+                else:
+                    for ln in lines_ci2:
+                        if _care_accept(ln) or re.search(r"\bDO\s*NOT\b", ln, flags=re.IGNORECASE) is not None:
+                            parts2.append(ln)
+
+                vv3 = _format_care_join(parts2)
+                if vv3 and len(vv3) >= 6:
+                    merged["care_instructions"] = _care_to_double_pipe(vv3)
         except Exception:
             pass
 
@@ -3646,6 +3757,109 @@ def _run_paddle(image_bgr: np.ndarray) -> Dict[str, Any]:
     }
 
 
+def _extract_care_instructions_from_crop(image_bgr: np.ndarray, lines: Any) -> Dict[str, Any]:
+    debug: Dict[str, Any] = {
+        "label_found": False,
+        "crop_bbox": None,
+        "crop_ocr_text": None,
+        "value": None,
+    }
+    try:
+        if not isinstance(lines, list) or not lines:
+            return debug
+
+        label_bbox: Optional[Dict[str, float]] = None
+        for l in lines:
+            if not isinstance(l, dict):
+                continue
+            txt = str(l.get("text") or "").strip()
+            if not txt:
+                continue
+            if re.search(r"\bcare\s*instructions\b", txt, flags=re.IGNORECASE) is None:
+                continue
+            poly = l.get("polygon")
+            if not poly:
+                continue
+            label_bbox = _polygon_to_bbox(poly)
+            break
+
+        if label_bbox is None:
+            return debug
+        debug["label_found"] = True
+
+        h, w = _ensure_bgr(image_bgr).shape[:2]
+        x0 = max(0, int(label_bbox["x"] - 12))
+        x1 = min(w, int(label_bbox.get("x2", label_bbox["x"] + label_bbox["w"]) + 900))
+        y0 = max(0, int(label_bbox["y"] - 8))
+        # extend more vertically; care sentence can be lower than the label
+        y1 = min(h, int(label_bbox.get("y2", label_bbox["y"] + label_bbox["h"]) + 260))
+        if x1 <= x0 or y1 <= y0:
+            return debug
+
+        debug["crop_bbox"] = {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
+        crop = _ensure_bgr(image_bgr)[y0:y1, x0:x1]
+        if crop.size == 0:
+            return debug
+
+        scale = 2.5
+        crop_up = cv2.resize(crop, dsize=None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+        ocr = _get_paddle_ocr()
+        res = ocr.ocr(crop_up, cls=True)
+        texts: List[str] = []
+        for item in (res or []):
+            for line in item:
+                _box, (t, _conf) = line
+                if t:
+                    texts.append(str(t))
+        if not texts:
+            return debug
+
+        joined = "\n".join(texts)
+        joined = _postprocess_ocr_text(joined)
+        debug["crop_ocr_text"] = joined[:800]
+
+        # Try to extract a care list from the crop OCR output
+        parts: List[str] = []
+        for ln in [x.strip() for x in joined.replace("\r", "\n").split("\n")]:
+            if not ln:
+                continue
+            if re.search(r"\b(HAND\s*WASH|WASH(?!ED)|DO\s*NOT|BLEACH|IRON|DRY\s*CLEAN|TUMBLE\s*DRY)\b", ln, flags=re.IGNORECASE) is not None:
+                parts.append(ln)
+
+        if not parts:
+            # Sometimes crop OCR yields a single line with pipes
+            for ln in [x.strip() for x in joined.replace("\r", "\n").split("\n")]:
+                if ln.count("|") >= 2:
+                    parts.append(ln)
+                    break
+
+        if not parts:
+            return debug
+
+        raw = " ".join(parts)
+        raw = " ".join(raw.split()).strip()
+        segs = [p.strip() for p in re.split(r"\s*\|+\s*", raw) if p.strip()]
+        if len(segs) >= 2:
+            # Dedup while preserving order
+            out: List[str] = []
+            seen = set()
+            for s in segs:
+                k = s.upper()
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(s)
+            debug["value"] = " || ".join(out).strip(" ,|")
+            return debug
+
+        debug["value"] = raw
+        return debug
+    except Exception as e:
+        debug["error"] = str(e)
+        return debug
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {"status": "ok"}
@@ -3672,6 +3886,8 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if not file_bytes:
         raise ValueError("Empty file")
+
+    pages_text: Optional[List[str]] = None
 
     if filename.lower().endswith(".pdf"):
         pages_text = _pdf_text_pages(file_bytes)
@@ -3806,6 +4022,143 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, page_res)
             page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
             page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
+
+        # CARE INSTRUCTIONS crop re-OCR fallback for paddle-based engines
+        try:
+            if engine in ("paddle", "paddle_ensemble"):
+                fields0 = page_res.get("fields") or {}
+                care0 = fields0.get("care_instructions") if isinstance(fields0, dict) else None
+
+                def _care_needs_crop(v: Any) -> bool:
+                    if not isinstance(v, str) or not v.strip():
+                        return True
+                    s2 = re.sub(r"\s+", " ", v).strip()
+                    has_kw = re.search(
+                        r"\b(HAND\s*WASH|WASH(?!ED)|DO\s*NOT|BLEACH|IRON|DRY\s*CLEAN|TUMBLE\s*DRY)\b",
+                        s2,
+                        flags=re.IGNORECASE,
+                    ) is not None
+                    compact = re.sub(r"[^A-Z0-9]", "", s2.upper())
+                    if not has_kw and re.search(r"(O|0|N){6,}", compact) is not None:
+                        return True
+                    return False
+
+                if _care_needs_crop(care0):
+                    # IMPORTANT: crop from the same image used for Paddle OCR so polygon coordinates align.
+                    care_dbg = _extract_care_instructions_from_crop(_ensure_bgr(input_for_ocr), page_res.get("lines"))
+                    page_res["care_crop_debug"] = {k: v for k, v in (care_dbg or {}).items() if k in {"label_found", "crop_bbox", "crop_ocr_text", "error"}}
+                    care_crop = (care_dbg or {}).get("value") if isinstance(care_dbg, dict) else None
+                    if isinstance(care_crop, str) and care_crop.strip() and isinstance(fields0, dict):
+                        fields0["care_instructions"] = care_crop.strip()
+                        page_res["fields"] = fields0
+        except Exception:
+            pass
+
+        try:
+            if filename.lower().endswith(".pdf") and pages_text and engine in ("paddle", "paddle_ensemble"):
+                fields0 = page_res.get("fields") or {}
+                care0 = fields0.get("care_instructions") if isinstance(fields0, dict) else None
+                pdf_dbg: Dict[str, Any] = {
+                    "has_pages_text": bool(pages_text),
+                    "page_idx": page_idx,
+                    "matched": False,
+                    "snippet": None,
+                }
+
+                def _care_needs_pdf(v: Any) -> bool:
+                    if not isinstance(v, str) or not v.strip():
+                        return True
+                    s2 = re.sub(r"\s+", " ", v).strip()
+                    has_kw = re.search(
+                        r"\b(HAND\s*WASH|WASH(?!ED)|DO\s*NOT|BLEACH|IRON|DRY\s*CLEAN|TUMBLE\s*DRY)\b",
+                        s2,
+                        flags=re.IGNORECASE,
+                    ) is not None
+                    compact = re.sub(r"[^A-Z0-9]", "", s2.upper())
+                    if not has_kw and re.search(r"(O|0|N){6,}", compact) is not None:
+                        return True
+                    return False
+
+                if _care_needs_pdf(care0) and page_idx - 1 < len(pages_text):
+                    t_pdf_page = _postprocess_ocr_text(pages_text[page_idx - 1] or "")
+                    care_kw = re.compile(r"\b(HAND\s*WASH|WASH(?!ED)|DO\s*NOT|BLEACH|IRON|DRY\s*CLEAN|TUMBLE\s*DRY)\b", flags=re.IGNORECASE)
+
+                    def _care_structure_hit_pdf(s: str) -> bool:
+                        ss = (s or "").strip()
+                        if not ss:
+                            return False
+                        pipe_count = ss.count("|")
+                        has_temp = re.search(r"\b\d{1,3}\s*(?:°\s*)?(?:C|F)\b", ss, flags=re.IGNORECASE) is not None
+                        has_fraction = re.search(r"\b\d{1,3}\s*/\s*\d{1,3}\b", ss) is not None
+                        alpha = len(re.findall(r"[A-Z]", ss.upper()))
+                        return (pipe_count >= 4) or (has_temp and (pipe_count >= 2 or has_fraction) and alpha >= 8)
+
+                    def _to_double_pipe(raw: str) -> str:
+                        r0 = " ".join((raw or "").replace("\r", "\n").replace("\n", " ").split()).strip().strip(" ,")
+                        if not r0:
+                            return r0
+                        segs0 = [p.strip() for p in re.split(r"\s*\|+\s*", r0) if p.strip()]
+                        if len(segs0) >= 2:
+                            out0: List[str] = []
+                            seen0 = set()
+                            for s0 in segs0:
+                                k0 = s0.upper()
+                                if k0 in seen0:
+                                    continue
+                                seen0.add(k0)
+                                out0.append(s0)
+                            return " || ".join(out0).strip(" ,|")
+                        return r0
+
+                    # A) Inline capture on same line as label
+                    m = re.search(
+                        r"\bcare\s*instructions\b\s*[:\-]?\s*(.+)$",
+                        t_pdf_page,
+                        flags=re.IGNORECASE | re.MULTILINE,
+                    )
+
+                    raw_candidate: Optional[str] = None
+                    if m and (m.group(1) or "").strip():
+                        raw_candidate = _to_double_pipe(m.group(1) or "")
+
+                    # B) Multi-line capture after the label (common in embedded PDF text)
+                    if not raw_candidate:
+                        lines_pdf = [ln.strip() for ln in t_pdf_page.replace("\r", "\n").split("\n")]
+                        start_i: Optional[int] = None
+                        for ii, ln in enumerate(lines_pdf):
+                            if re.search(r"\bcare\s*instructions\b", ln, flags=re.IGNORECASE):
+                                start_i = ii
+                                tail = re.sub(r"(?i).*\bcare\s*instructions\b\s*[:\-]?", "", ln).strip()
+                                parts_pdf: List[str] = []
+                                if tail:
+                                    parts_pdf.append(tail)
+                                stop_pat = re.compile(
+                                    r"\b(COMPOSITIONS\s+INFORMATION|HANGTAG\s+LABEL|MAIN\s+LABEL|EXTERNAL\s+FABRIC|HANGING|TOTAL\s+ORDER|ORDER\-?NR|DATE|SUPPLIER|ARTICLE|DESCRIPTION|MARKET\s+OF\s+ORIGIN|PVP)\b",
+                                    flags=re.IGNORECASE,
+                                )
+                                for jj in range(ii + 1, min(len(lines_pdf), ii + 12)):
+                                    nxt = (lines_pdf[jj] or "").strip()
+                                    if not nxt:
+                                        if parts_pdf:
+                                            break
+                                        continue
+                                    if stop_pat.search(nxt) is not None:
+                                        break
+                                    parts_pdf.append(nxt)
+                                if parts_pdf:
+                                    raw_candidate = _to_double_pipe(" ".join(parts_pdf))
+                                break
+
+                    if raw_candidate:
+                        pdf_dbg["matched"] = True
+                        pdf_dbg["snippet"] = raw_candidate[:300]
+                        if care_kw.search(raw_candidate) is not None or _care_structure_hit_pdf(raw_candidate):
+                            fields0["care_instructions"] = raw_candidate
+                            page_res["fields"] = fields0
+
+                page_res["care_pdf_debug"] = pdf_dbg
+        except Exception:
+            pass
 
         if isinstance(page_res.get("tables"), list):
             page_res["tables"] = [_table_add_rows_matrix(t) for t in (page_res.get("tables") or [])]
