@@ -1,10 +1,12 @@
 import io
+import json
 import os
 import re
 import base64
 import time
 import uuid
 import logging
+import sys
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -2197,6 +2199,10 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                     # Drop noise rows (commonly from UNIT LOT value splitting into COLOUR column)
                     if re.fullmatch(r"\d{1,6}", colour or "") and not any([xs_v, s_v, m_v, l_v, xl_v, tot_v]):
                         continue
+
+                    # Skip TOTAL summary row
+                    if re.fullmatch(r"TOTAL", (colour or "").strip(), flags=re.IGNORECASE):
+                        continue
                     grid_out.append(
                         {
                             "colour": colour,
@@ -2237,8 +2243,45 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                 "cost_price": None,
             }
 
+            def _parse_logistic_order(blob: str) -> Optional[str]:
+                try:
+                    b = str(blob or "").strip()
+                    if not b:
+                        return None
+                    b = re.sub(r"\s+", " ", b)
+                    if re.search(r"\bLOGISTIC\s*ORDER\b", b, flags=re.IGNORECASE) is None:
+                        return None
+                    # Typical: "LOGISTIC ORDER 55876-D / 1" or "LOGISTIC ORDER: 55876-D/1"
+                    m = re.search(
+                        r"\bLOGISTIC\s*ORDER\b\s*[:\-]?\s*([A-Z0-9\-]+\s*/\s*\d{1,3})\b",
+                        b,
+                        flags=re.IGNORECASE,
+                    )
+                    if m:
+                        return re.sub(r"\s+", " ", str(m.group(1) or "").strip())
+                    # Fallback: capture tail after label
+                    m2 = re.search(r"\bLOGISTIC\s*ORDER\b\s*[:\-]?\s*(.+)$", b, flags=re.IGNORECASE)
+                    if m2:
+                        tail = str(m2.group(1) or "").strip()
+                        tail = re.sub(r"\s+", " ", tail)
+                        if tail:
+                            return tail
+                    return None
+                except Exception:
+                    return None
+
             def _consume_meta_row(label: str, val: str) -> None:
-                lk = _norm_key(label)
+                lk0 = _norm_key(label)
+                lk = lk0
+                # Alias common OCR label normalizations to payload field keys
+                if lk0 in {"logisticorder", "logisticsorder"}:
+                    lk = "logistic_order"
+                elif lk0 in {"handoverdate", "handoverdate:"}:
+                    lk = "handover_date"
+                elif lk0 in {"transportmode", "transportationmode"}:
+                    lk = "transport_mode"
+                elif lk0 in {"presentationtype"}:
+                    lk = "presentation_type"
                 if lk in {"logistic_order", "delivery", "incoterm", "from", "handover_date", "transport_mode", "presentation_type"}:
                     meta[lk] = val
 
@@ -2252,6 +2295,11 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                     val = str(r[1] or "").strip()
                     if label and val:
                         _consume_meta_row(label, val)
+                    # Some OCR outputs merge label+value into the label cell
+                    if meta.get("logistic_order") in (None, ""):
+                        lo = _parse_logistic_order(label)
+                        if lo:
+                            meta["logistic_order"] = lo
 
             # Also scan rows dicts for metadata + cost price
             rows = t.get("rows") or []
@@ -2285,8 +2333,23 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                         continue
                     if c0 and v0:
                         _consume_meta_row(c0, v0)
+
+                    # Fallback: parse LOGISTIC ORDER from entire row blob (value might not be in XS)
+                    if meta.get("logistic_order") in (None, ""):
+                        try:
+                            blob = " ".join([str(v or "").strip() for v in r.values() if str(v or "").strip()])
+                            blob = re.sub(r"\s+", " ", blob).strip()
+                            lo = _parse_logistic_order(blob)
+                            if lo:
+                                meta["logistic_order"] = lo
+                        except Exception:
+                            pass
                     if re.search(r"\bCOST\s*PRICE\b", c0, flags=re.IGNORECASE):
                         meta["cost_price"] = v0 or meta.get("cost_price")
+                        continue
+
+                    # Skip TOTAL summary row in payload lines
+                    if re.fullmatch(r"TOTAL", (c0 or "").strip(), flags=re.IGNORECASE):
                         continue
                     # Only keep real grid rows
                     if c0 and re.search(r"\b(LOGISTIC\s+ORDER|DELIVERY|INCOTERM|FROM|HANDOVER\s+DATE|TRANSPORT\s+MODE|PRESENTATION\s+TYPE)\b", c0, flags=re.IGNORECASE):
@@ -4969,6 +5032,44 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
 
+    try:
+        if str(os.getenv("DEBUG_PARTIAL_DELIVERIES") or "").strip() in {"1", "true", "True", "YES", "yes"}:
+            pd = []
+            for t in combined_tables:
+                if not isinstance(t, dict):
+                    continue
+                if str(t.get("table_kind") or "").strip().lower() != "partial_deliveries_grid":
+                    continue
+                pd.append(
+                    {
+                        "page": t.get("page"),
+                        "table_index": t.get("table_index"),
+                        "headers": t.get("headers"),
+                        "pre_rows_matrix": t.get("pre_rows_matrix"),
+                        "rows": t.get("rows"),
+                    }
+                )
+            if pd:
+                msg = json.dumps(pd, ensure_ascii=False)
+                # Avoid extremely large logs
+                if len(msg) > 20000:
+                    msg = msg[:20000] + "...<truncated>"
+                logger.info("DEBUG_PARTIAL_DELIVERIES request_id=%s %s", request_id, msg)
+                try:
+                    print(f"DEBUG_PARTIAL_DELIVERIES_PRINT request_id={request_id} {msg}")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+            else:
+                logger.info("DEBUG_PARTIAL_DELIVERIES request_id=%s no partial_deliveries_grid tables", request_id)
+                try:
+                    print(f"DEBUG_PARTIAL_DELIVERIES_PRINT request_id={request_id} no partial_deliveries_grid tables")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     combined_fields: List[Dict[str, Any]] = []
     for p in all_pages:
         if p.get("fields"):
@@ -5299,6 +5400,43 @@ async def ocr_extract(
             combined_tables.append(tt)
 
     combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
+
+    try:
+        if str(os.getenv("DEBUG_PARTIAL_DELIVERIES") or "").strip() in {"1", "true", "True", "YES", "yes"}:
+            pd = []
+            for t in combined_tables:
+                if not isinstance(t, dict):
+                    continue
+                if str(t.get("table_kind") or "").strip().lower() != "partial_deliveries_grid":
+                    continue
+                pd.append(
+                    {
+                        "page": t.get("page"),
+                        "table_index": t.get("table_index"),
+                        "headers": t.get("headers"),
+                        "pre_rows_matrix": t.get("pre_rows_matrix"),
+                        "rows": t.get("rows"),
+                    }
+                )
+            if pd:
+                msg = json.dumps(pd, ensure_ascii=False)
+                if len(msg) > 20000:
+                    msg = msg[:20000] + "...<truncated>"
+                logger.info("DEBUG_PARTIAL_DELIVERIES request_id=%s %s", request_id, msg)
+                try:
+                    print(f"DEBUG_PARTIAL_DELIVERIES_PRINT request_id={request_id} {msg}")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+            else:
+                logger.info("DEBUG_PARTIAL_DELIVERIES request_id=%s no partial_deliveries_grid tables", request_id)
+                try:
+                    print(f"DEBUG_PARTIAL_DELIVERIES_PRINT request_id={request_id} no partial_deliveries_grid tables")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     combined_fields: List[Dict[str, Any]] = []
     for p in all_pages:
