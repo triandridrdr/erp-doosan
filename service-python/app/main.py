@@ -2086,6 +2086,119 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
     if not isinstance(tables, list):
         return payload
 
+    def _levenshtein(a: str, b: str, max_dist: int = 4) -> int:
+        aa = str(a or "")
+        bb = str(b or "")
+        if aa == bb:
+            return 0
+        if not aa:
+            return len(bb)
+        if not bb:
+            return len(aa)
+        if abs(len(aa) - len(bb)) > max_dist:
+            return max_dist + 1
+        prev = list(range(len(bb) + 1))
+        for i, ca in enumerate(aa, start=1):
+            cur = [i]
+            row_best = max_dist + 1
+            for j, cb in enumerate(bb, start=1):
+                ins = cur[j - 1] + 1
+                dele = prev[j] + 1
+                sub = prev[j - 1] + (0 if ca == cb else 1)
+                v = ins if ins < dele else dele
+                if sub < v:
+                    v = sub
+                cur.append(v)
+                if v < row_best:
+                    row_best = v
+            if row_best > max_dist:
+                return max_dist + 1
+            prev = cur
+        return prev[-1]
+
+    _HEADER_CANON_KEYS = {
+        "ordernr",
+        "date",
+        "season",
+        "buyer",
+        "purchaser",
+        "supplier",
+        "sendto",
+        "paymentterms",
+        "supplierref",
+        "article",
+        "description",
+        "marketoforigin",
+        "pvp",
+        "compositionsinformation",
+        "careinstructions",
+        "hangtaglabel",
+        "mainlabel",
+        "externalfabric",
+        "hanging",
+        "totalorder",
+    }
+
+    _HEADER_LABEL_TO_CANON = {
+        "ordernr": "ordernr",
+        "order_nr": "ordernr",
+        "orderno": "ordernr",
+        "order": "ordernr",
+        "date": "date",
+        "orderdate": "date",
+        "dateoforder": "date",
+        "season": "season",
+        "buyer": "buyer",
+        "purchaser": "purchaser",
+        "supplier": "supplier",
+        "sendto": "sendto",
+        "send_to": "sendto",
+        "paymentterms": "paymentterms",
+        "payment_terms": "paymentterms",
+        "termsofpayment": "paymentterms",
+        "supplierref": "supplierref",
+        "supplier_ref": "supplierref",
+        "article": "article",
+        "description": "description",
+        "marketoforigin": "marketoforigin",
+        "market_origin": "marketoforigin",
+        "pvp": "pvp",
+        "compositionsinformation": "compositionsinformation",
+        "compositioninformation": "compositionsinformation",
+        "composition": "compositionsinformation",
+        "careinstructions": "careinstructions",
+        "care": "careinstructions",
+        "hangtaglabel": "hangtaglabel",
+        "mainlabel": "mainlabel",
+        "externalfabric": "externalfabric",
+        "hanging": "hanging",
+        "totalorder": "totalorder",
+        "total": "totalorder",
+    }
+
+    def _canon_header_key_fuzzy(label: str) -> str:
+        nk = _norm_key(label)
+        if not nk:
+            return ""
+        direct = _HEADER_LABEL_TO_CANON.get(nk)
+        if direct:
+            return direct
+        if nk in _HEADER_CANON_KEYS:
+            return nk
+        # Fuzzy-match only against known label tokens to reduce false positives.
+        best_key = ""
+        best_d = 5
+        for cand in _HEADER_LABEL_TO_CANON.keys():
+            d = _levenshtein(nk, cand, max_dist=4)
+            if d < best_d:
+                best_d = d
+                best_key = cand
+                if best_d <= 1:
+                    break
+        if best_key and best_d <= 2:
+            return _HEADER_LABEL_TO_CANON.get(best_key, "")
+        return ""
+
     def _infer_colour_from_row(row: Dict[str, Any]) -> str:
         try:
             vals: List[str] = []
@@ -2138,7 +2251,9 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                     k = str(p.get("key") or "").strip()
                     v = str(p.get("value") or "").strip()
                     if k:
-                        payload["header"][_norm_key(k)] = v
+                        ck = _canon_header_key_fuzzy(k) or _norm_key(k)
+                        if ck:
+                            payload["header"][ck] = v
             else:
                 # fallback to rows_matrix
                 rm = ai_tbl.get("rows_matrix")
@@ -2149,7 +2264,9 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                         k = str(r[0] or "").strip()
                         v = str(r[1] or "").strip()
                         if k and k.lower() != "key":
-                            payload["header"][_norm_key(k)] = v
+                            ck = _canon_header_key_fuzzy(k) or _norm_key(k)
+                            if ck:
+                                payload["header"][ck] = v
     except Exception:
         pass
 
@@ -2282,6 +2399,33 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                     lk = "transport_mode"
                 elif lk0 in {"presentationtype"}:
                     lk = "presentation_type"
+                else:
+                    # Fuzzy-match common typos for partial meta labels
+                    try:
+                        partial_label_map = {
+                            "logisticorder": "logistic_order",
+                            "logisticsorder": "logistic_order",
+                            "delivery": "delivery",
+                            "incoterm": "incoterm",
+                            "from": "from",
+                            "handoverdate": "handover_date",
+                            "transportmode": "transport_mode",
+                            "presentationtype": "presentation_type",
+                        }
+                        if lk0 and lk0 not in partial_label_map:
+                            best_key = ""
+                            best_d = 5
+                            for cand in partial_label_map.keys():
+                                d = _levenshtein(lk0, cand, max_dist=4)
+                                if d < best_d:
+                                    best_d = d
+                                    best_key = cand
+                                    if best_d <= 1:
+                                        break
+                            if best_key and best_d <= 2:
+                                lk = partial_label_map.get(best_key, lk)
+                    except Exception:
+                        pass
                 if lk in {"logistic_order", "delivery", "incoterm", "from", "handover_date", "transport_mode", "presentation_type"}:
                     meta[lk] = val
 
@@ -5482,71 +5626,129 @@ async def ocr_extract(
                     except Exception:
                         return str(s or "").strip().lower()
 
-                def _canon_header_payload_key(label: str) -> str:
-                    lk0 = _safe_norm_key(label)
-                    lk = lk0
-                    if lk0 in {"ordernr", "order_nr", "orderno", "order"}:
-                        lk = "ordernr"
-                    elif lk0 in {"date", "orderdate", "dateoforder"}:
-                        lk = "date"
-                    elif lk0 in {"season"}:
-                        lk = "season"
-                    elif lk0 in {"buyer"}:
-                        lk = "buyer"
-                    elif lk0 in {"purchaser"}:
-                        lk = "purchaser"
-                    elif lk0 in {"supplier"}:
-                        lk = "supplier"
-                    elif lk0 in {"sendto", "send_to", "send"}:
-                        lk = "sendto"
-                    elif lk0 in {"paymentterms", "payment_terms", "termsofpayment", "terms"}:
-                        lk = "paymentterms"
-                    elif lk0 in {"supplierref", "supplier_ref"}:
-                        lk = "supplierref"
-                    elif lk0 in {"article"}:
-                        lk = "article"
-                    elif lk0 in {"description"}:
-                        lk = "description"
-                    elif lk0 in {"marketoforigin", "market_origin", "marketof"}:
-                        lk = "marketoforigin"
-                    elif lk0 in {"pvp"}:
-                        lk = "pvp"
-                    elif lk0 in {"compositionsinformation", "compositioninformation", "compositions", "composition"}:
-                        lk = "compositionsinformation"
-                    elif lk0 in {"careinstructions", "care"}:
-                        lk = "careinstructions"
-                    elif lk0 in {"hangtaglabel"}:
-                        lk = "hangtaglabel"
-                    elif lk0 in {"mainlabel"}:
-                        lk = "mainlabel"
-                    elif lk0 in {"externalfabric"}:
-                        lk = "externalfabric"
-                    elif lk0 in {"hanging"}:
-                        lk = "hanging"
-                    elif lk0 in {"totalorder", "total"}:
-                        lk = "totalorder"
-                    return lk
+                def _levenshtein(a: str, b: str, max_dist: int = 4) -> int:
+                    aa = str(a or "")
+                    bb = str(b or "")
+                    if aa == bb:
+                        return 0
+                    if not aa:
+                        return len(bb)
+                    if not bb:
+                        return len(aa)
+                    if abs(len(aa) - len(bb)) > max_dist:
+                        return max_dist + 1
+                    prev = list(range(len(bb) + 1))
+                    for i, ca in enumerate(aa, start=1):
+                        cur = [i]
+                        row_best = max_dist + 1
+                        for j, cb in enumerate(bb, start=1):
+                            ins = cur[j - 1] + 1
+                            dele = prev[j] + 1
+                            sub = prev[j - 1] + (0 if ca == cb else 1)
+                            v = ins if ins < dele else dele
+                            if sub < v:
+                                v = sub
+                            cur.append(v)
+                            if v < row_best:
+                                row_best = v
+                        if row_best > max_dist:
+                            return max_dist + 1
+                        prev = cur
+                    return prev[-1]
 
-                def _canon_partial_payload_key(label: str) -> str:
+                _HEADER_LABEL_TO_PAYLOAD = {
+                    "ordernr": "ordernr",
+                    "order_nr": "ordernr",
+                    "orderno": "ordernr",
+                    "order": "ordernr",
+                    "date": "date",
+                    "orderdate": "date",
+                    "dateoforder": "date",
+                    "season": "season",
+                    "buyer": "buyer",
+                    "purchaser": "purchaser",
+                    "supplier": "supplier",
+                    "sendto": "sendto",
+                    "send_to": "sendto",
+                    "send": "sendto",
+                    "paymentterms": "paymentterms",
+                    "payment_terms": "paymentterms",
+                    "termsofpayment": "paymentterms",
+                    "terms": "paymentterms",
+                    "supplierref": "supplierref",
+                    "supplier_ref": "supplierref",
+                    "article": "article",
+                    "description": "description",
+                    "marketoforigin": "marketoforigin",
+                    "market_origin": "marketoforigin",
+                    "marketof": "marketoforigin",
+                    "pvp": "pvp",
+                    "compositionsinformation": "compositionsinformation",
+                    "compositioninformation": "compositionsinformation",
+                    "compositions": "compositionsinformation",
+                    "composition": "compositionsinformation",
+                    "careinstructions": "careinstructions",
+                    "care": "careinstructions",
+                    "hangtaglabel": "hangtaglabel",
+                    "mainlabel": "mainlabel",
+                    "externalfabric": "externalfabric",
+                    "hanging": "hanging",
+                    "totalorder": "totalorder",
+                    "total": "totalorder",
+                }
+
+                def _canon_header_payload_key(label: str) -> Dict[str, str]:
                     lk0 = _safe_norm_key(label)
-                    lk = lk0
-                    if lk0 in {"logisticorder", "logisticsorder"}:
-                        lk = "logistic_order"
-                    elif lk0 in {"handoverdate"}:
-                        lk = "handover_date"
-                    elif lk0 in {"transportmode", "transportationmode"}:
-                        lk = "transport_mode"
-                    elif lk0 in {"presentationtype"}:
-                        lk = "presentation_type"
-                    elif lk0 in {"costprice"}:
-                        lk = "cost_price"
-                    elif lk0 in {"delivery"}:
-                        lk = "delivery"
-                    elif lk0 in {"incoterm"}:
-                        lk = "incoterm"
-                    elif lk0 in {"from"}:
-                        lk = "from"
-                    return lk
+                    if not lk0:
+                        return {"payload_key": "", "match_mode": "unknown"}
+                    direct = _HEADER_LABEL_TO_PAYLOAD.get(lk0)
+                    if direct:
+                        return {"payload_key": direct, "match_mode": "direct"}
+                    best_key = ""
+                    best_d = 5
+                    for cand in _HEADER_LABEL_TO_PAYLOAD.keys():
+                        d = _levenshtein(lk0, cand, max_dist=4)
+                        if d < best_d:
+                            best_d = d
+                            best_key = cand
+                            if best_d <= 1:
+                                break
+                    if best_key and best_d <= 2:
+                        return {"payload_key": _HEADER_LABEL_TO_PAYLOAD.get(best_key, ""), "match_mode": "fuzzy"}
+                    return {"payload_key": lk0, "match_mode": "unknown"}
+
+                _PARTIAL_LABEL_TO_PAYLOAD = {
+                    "logisticorder": "logistic_order",
+                    "logisticsorder": "logistic_order",
+                    "handoverdate": "handover_date",
+                    "transportmode": "transport_mode",
+                    "transportationmode": "transport_mode",
+                    "presentationtype": "presentation_type",
+                    "costprice": "cost_price",
+                    "delivery": "delivery",
+                    "incoterm": "incoterm",
+                    "from": "from",
+                }
+
+                def _canon_partial_payload_key(label: str) -> Dict[str, str]:
+                    lk0 = _safe_norm_key(label)
+                    if not lk0:
+                        return {"payload_key": "", "match_mode": "unknown"}
+                    direct = _PARTIAL_LABEL_TO_PAYLOAD.get(lk0)
+                    if direct:
+                        return {"payload_key": direct, "match_mode": "direct"}
+                    best_key = ""
+                    best_d = 5
+                    for cand in _PARTIAL_LABEL_TO_PAYLOAD.keys():
+                        d = _levenshtein(lk0, cand, max_dist=4)
+                        if d < best_d:
+                            best_d = d
+                            best_key = cand
+                            if best_d <= 1:
+                                break
+                    if best_key and best_d <= 2:
+                        return {"payload_key": _PARTIAL_LABEL_TO_PAYLOAD.get(best_key, ""), "match_mode": "fuzzy"}
+                    return {"payload_key": lk0, "match_mode": "unknown"}
 
                 candidates_header: List[Dict[str, Any]] = []
                 candidates_partial_meta: List[Dict[str, Any]] = []
@@ -5568,7 +5770,9 @@ async def ocr_extract(
                                 k = str(p.get("key") or "").strip()
                                 v = str(p.get("value") or "").strip()
                                 if k:
-                                    payload_key = _canon_header_payload_key(k)
+                                    canon = _canon_header_payload_key(k)
+                                    payload_key = str(canon.get("payload_key") or "")
+                                    match_mode = str(canon.get("match_mode") or "unknown")
                                     candidates_header.append(
                                         {
                                             "page": page,
@@ -5577,6 +5781,7 @@ async def ocr_extract(
                                             "key": k,
                                             "key_norm": _safe_norm_key(k),
                                             "payload_key": payload_key,
+                                            "match_mode": match_mode,
                                             "value": v,
                                         }
                                     )
@@ -5589,7 +5794,9 @@ async def ocr_extract(
                                     k = str(r[0] or "").strip()
                                     v = str(r[1] or "").strip()
                                     if k and k.lower() != "key":
-                                        payload_key = _canon_header_payload_key(k)
+                                        canon = _canon_header_payload_key(k)
+                                        payload_key = str(canon.get("payload_key") or "")
+                                        match_mode = str(canon.get("match_mode") or "unknown")
                                         candidates_header.append(
                                             {
                                                 "page": page,
@@ -5598,6 +5805,7 @@ async def ocr_extract(
                                                 "key": k,
                                                 "key_norm": _safe_norm_key(k),
                                                 "payload_key": payload_key,
+                                                "match_mode": match_mode,
                                                 "value": v,
                                             }
                                         )
@@ -5616,7 +5824,9 @@ async def ocr_extract(
                                 # Skip obvious table headers
                                 if re.fullmatch(r"(?i)COLOU?R|XS|S|M|L|XL|TOTAL", k.strip()):
                                     continue
-                                payload_key = _canon_header_payload_key(k)
+                                canon = _canon_header_payload_key(k)
+                                payload_key = str(canon.get("payload_key") or "")
+                                match_mode = str(canon.get("match_mode") or "unknown")
                                 candidates_header.append(
                                     {
                                         "page": page,
@@ -5625,6 +5835,7 @@ async def ocr_extract(
                                         "key": k,
                                         "key_norm": _safe_norm_key(k),
                                         "payload_key": payload_key,
+                                        "match_mode": match_mode,
                                         "value": v,
                                     }
                                 )
@@ -5638,7 +5849,9 @@ async def ocr_extract(
                                 k = str(r[0] or "").strip()
                                 v = str(r[1] or "").strip()
                                 if k:
-                                    payload_key = _canon_partial_payload_key(k)
+                                    canon = _canon_partial_payload_key(k)
+                                    payload_key = str(canon.get("payload_key") or "")
+                                    match_mode = str(canon.get("match_mode") or "unknown")
                                     candidates_partial_meta.append(
                                         {
                                             "page": page,
@@ -5647,6 +5860,7 @@ async def ocr_extract(
                                             "key": k,
                                             "key_norm": _safe_norm_key(k),
                                             "payload_key": payload_key,
+                                            "match_mode": match_mode,
                                             "value": v,
                                         }
                                     )
@@ -5688,7 +5902,7 @@ async def ocr_extract(
                 payload_header = (sales_order_payload or {}).get("header") or {}
                 used_header_keys = {_safe_norm_key(k) for k in payload_header.keys()}
 
-                used_header_payload_keys = {_canon_header_payload_key(k) for k in payload_header.keys()}
+                used_header_payload_keys = {str(_canon_header_payload_key(k).get("payload_key") or "") for k in payload_header.keys()}
 
                 used_partial_meta_keys: set[str] = set()
                 for mh in (sales_order_payload or {}).get("partial_delivery_headers") or []:
