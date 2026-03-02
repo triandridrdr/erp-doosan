@@ -62,6 +62,14 @@ logger = logging.getLogger("python_ocr")
 if not logger.handlers:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
+try:
+    _so_dbg_tables_boot = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if _so_dbg_tables_boot:
+        logging.getLogger().setLevel(logging.INFO)
+        logger.setLevel(logging.INFO)
+except Exception:
+    pass
+
 app = FastAPI(title="Python OCR Service", version="0.1.0")
 
 try:
@@ -121,6 +129,17 @@ class _TableHtmlParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self.in_td or self.in_th:
             self.current_cell.append(data)
+
+
+def _looks_like_pdf_bytes(file_bytes: bytes) -> bool:
+    try:
+        if not isinstance(file_bytes, (bytes, bytearray)):
+            return False
+        if len(file_bytes) < 5:
+            return False
+        return bytes(file_bytes[:5]) == b"%PDF-"
+    except Exception:
+        return False
 
 
 def _parse_table_html(html: str) -> Optional[Dict[str, Any]]:
@@ -239,34 +258,67 @@ def _pdf_tables_pages_tabula(file_bytes: bytes, page_count: int) -> Optional[Lis
             return None
         return {"headers": headers, "rows": rows}
 
+    tmp_path: Optional[str] = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as f:
-            f.write(file_bytes)
-            f.flush()
+        # NOTE: On Windows, NamedTemporaryFile keeps the file handle open and tabula-java
+        # cannot open it ("being used by another process"). Use a closed temp file path.
+        fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(file_bytes)
+                f.flush()
+        except Exception:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            raise
 
-            out: List[List[Dict[str, Any]]] = []
-            for p in range(1, page_count + 1):
+        out: List[List[Dict[str, Any]]] = []
+        for p in range(1, page_count + 1):
+            try:
+                dfs = tabula.read_pdf(
+                    tmp_path,
+                    pages=p,
+                    multiple_tables=True,
+                    guess=True,
+                    pandas_options={"header": None},
+                )
+            except Exception as e:
+                dfs = None
                 try:
-                    dfs = tabula.read_pdf(
-                        f.name,
-                        pages=p,
-                        multiple_tables=True,
-                        guess=True,
-                        pandas_options={"header": None},
-                    )
+                    so_dbg_tables = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
+                    if so_dbg_tables:
+                        logger.info(
+                            "so_pdf_tabula_read_pdf_failed %s",
+                            json.dumps(
+                                {
+                                    "event": "so_pdf_tabula_read_pdf_failed",
+                                    "page": p,
+                                    "error": str(e),
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
                 except Exception:
-                    dfs = None
+                    pass
 
-                page_tables: List[Dict[str, Any]] = []
-                if isinstance(dfs, list):
-                    for df in dfs:
-                        t = _df_to_table(df)
-                        if isinstance(t, dict) and t.get("headers") and t.get("rows"):
-                            page_tables.append(t)
-                out.append(page_tables)
-            return out
+            page_tables: List[Dict[str, Any]] = []
+            if isinstance(dfs, list):
+                for df in dfs:
+                    t = _df_to_table(df)
+                    if isinstance(t, dict) and t.get("headers") and t.get("rows"):
+                        page_tables.append(t)
+            out.append(page_tables)
+        return out
     except Exception:
         return None
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 
 def _polygon_to_bbox(polygon: List[Dict[str, float]]) -> Dict[str, float]:
@@ -285,6 +337,153 @@ def _polygon_to_bbox(polygon: List[Dict[str, float]]) -> Dict[str, float]:
         "y_center": (y0 + y1) / 2.0,
         "x2": x1,
         "y2": y1,
+    }
+
+
+def _canon_num_token(s: Any) -> str:
+    t = str(s or "").strip()
+    if not t:
+        return ""
+    t = re.sub(r"\s+", " ", t).strip()
+    # common pdfplumber/tabula artifact: thousands separator with a space after comma: '5, 338'
+    t = re.sub(r"(\d),(\s+)(\d)", r"\1\3", t)
+    t = t.replace(" ", "")
+    return t
+
+
+def _parse_total_order_from_text(txt: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(txt, str) or not txt.strip():
+        return None
+    s = txt.replace("\r", "\n")
+    s = re.sub(r"\u00A0", " ", s)
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in s.split("\n")]
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return None
+
+    start = None
+    for i, ln in enumerate(lines):
+        if re.search(r"\bTOTAL\s+ORDER\b", ln, flags=re.IGNORECASE):
+            start = i
+            break
+    if start is None:
+        return None
+
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if re.search(r"\bPARTIAL\s+DELIVERIES\b", lines[j], flags=re.IGNORECASE):
+            end = j
+            break
+        if re.search(r"\bpage\s+\d+\s+of\s+\d+\b", lines[j], flags=re.IGNORECASE):
+            end = j
+            break
+
+    chunk = lines[start:end]
+    if not chunk:
+        return None
+
+    unit_lot = None
+    for ln in chunk:
+        m = re.search(r"\bUNIT\s*LOT\b\s*(\d{1,6})\b", ln, flags=re.IGNORECASE)
+        if m:
+            unit_lot = str(m.group(1) or "").strip() or None
+            break
+
+    # Find the header row with size tokens
+    header_idx = None
+    for i, ln in enumerate(chunk[:10]):
+        if re.search(r"\bCOLOU?R\b", ln, flags=re.IGNORECASE) and re.search(r"\bXS\b", ln) and re.search(r"\bXL\b", ln, flags=re.IGNORECASE):
+            header_idx = i
+            break
+    if header_idx is None:
+        return None
+
+    out_rows: List[Dict[str, str]] = []
+
+    def _extract_nums(ln: str) -> List[str]:
+        try:
+            s0 = str(ln or "")
+            if not s0.strip():
+                return []
+            # Normalize common thousands formatting: '5, 338' -> '5,338'
+            s0 = re.sub(r"(\d),\s+(\d{3})\b", r"\1,\2", s0)
+            s0 = re.sub(r"\s+", " ", s0).strip()
+            toks = [t for t in s0.split(" ") if t and re.search(r"\d", t) is not None]
+            out: List[str] = []
+            for t in toks:
+                # keep only digits and separators, then canonicalize
+                t2 = re.sub(r"[^0-9,\.\s]", "", t)
+                c = _canon_num_token(t2)
+                if c and re.search(r"\d", c) is not None:
+                    out.append(c)
+            return out
+        except Exception:
+            return []
+
+    i = header_idx + 1
+    while i < len(chunk):
+        ln = chunk[i]
+        if re.fullmatch(r"TOTAL", ln.strip(), flags=re.IGNORECASE):
+            i += 1
+            continue
+        if re.search(r"\bUNIT\s*LOT\b", ln, flags=re.IGNORECASE):
+            i += 1
+            continue
+        if re.search(r"\bTHIS\s+GARMENT\b", ln, flags=re.IGNORECASE):
+            break
+        if re.search(r"\bIMAGE\s+AND\s+MEASURES\b", ln, flags=re.IGNORECASE):
+            break
+        if re.search(r"\bLOGISTIC\s+ORDER\b", ln, flags=re.IGNORECASE):
+            break
+
+        m = re.search(r"\b(\d{2,6})\s*[-–—]\s*([A-Z][A-Z0-9\s/]+?)\b(.*)$", ln, flags=re.IGNORECASE)
+        if not m:
+            i += 1
+            continue
+
+        colour = f"{(m.group(1) or '').strip()} - {(m.group(2) or '').strip()}".strip(" -")
+        tail = (m.group(3) or "").strip()
+        nums: List[str] = []
+        if tail:
+            nums.extend(_extract_nums(tail))
+
+        # pdf text sometimes wraps numbers onto next lines; accumulate until we have XS..Total (6 nums)
+        j = i + 1
+        while len(nums) < 6 and j < len(chunk):
+            nxt = chunk[j]
+            if re.search(r"\bUNIT\s*LOT\b", nxt, flags=re.IGNORECASE):
+                break
+            if re.fullmatch(r"TOTAL", nxt.strip(), flags=re.IGNORECASE):
+                break
+            if re.search(r"\bTHIS\s+GARMENT\b", nxt, flags=re.IGNORECASE):
+                break
+            if re.search(r"\bIMAGE\s+AND\s+MEASURES\b", nxt, flags=re.IGNORECASE):
+                break
+            if re.search(r"\bLOGISTIC\s+ORDER\b", nxt, flags=re.IGNORECASE):
+                break
+            # stop if we hit the next colour row
+            if re.search(r"\b\d{2,6}\s*[-–—]\s*[A-Z]", nxt, flags=re.IGNORECASE):
+                break
+            nums.extend(_extract_nums(nxt))
+            j += 1
+
+        if len(nums) >= 6:
+            xs, s2, m2, l2, xl2, tot = nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]
+            out_rows.append({"COLOUR": colour, "XS": xs, "S": s2, "M": m2, "L": l2, "XL": xl2, "Total": tot})
+            i = j
+            continue
+
+        i += 1
+
+    if not out_rows:
+        return None
+    return {
+        "headers": ["COLOUR", "XS", "S", "M", "L", "XL", "Total"],
+        "rows": out_rows,
+        "table_kind": "total_order_grid",
+        "include_headers_in_rows_matrix": True,
+        "_source": "pdf_text_total_order",
+        "unit_lot": unit_lot,
     }
 
 
@@ -603,6 +802,102 @@ def _build_ai_kv_table_from_fields(fields: Any) -> Dict[str, Any]:
     }
 
 
+def _infer_table_kind_generic(tbl: Any) -> Optional[str]:
+    if not isinstance(tbl, dict):
+        return None
+    if str(tbl.get("table_kind") or "").strip():
+        return str(tbl.get("table_kind") or "").strip()
+
+    try:
+        headers = tbl.get("headers") or []
+        header_text = " ".join([str(h or "") for h in headers]).upper()
+    except Exception:
+        header_text = ""
+
+    try:
+        rm = tbl.get("rows_matrix") or []
+        head = (
+            " ".join([str(x or "") for row in rm[:6] if isinstance(row, list) for x in row]).upper()
+            if isinstance(rm, list)
+            else ""
+        )
+    except Exception:
+        head = ""
+
+    blob = (header_text + " " + head).strip()
+    if not blob:
+        return None
+
+    size_tokens = ["XXS", "XS", "S", "M", "L", "XL", "XXL"]
+    size_hits = sum(1 for tok in size_tokens if re.search(r"\b" + re.escape(tok) + r"\b", blob) is not None)
+
+    has_colour = re.search(r"\bCOLOU?R\b", blob, flags=re.IGNORECASE) is not None
+    has_total = re.search(r"\bTOTAL\b", blob, flags=re.IGNORECASE) is not None
+    has_unit_lot = re.search(r"\bUNIT\s*LOT\b", blob, flags=re.IGNORECASE) is not None
+
+    has_logistic = re.search(r"\bLOGISTIC\s+ORDER\b", blob, flags=re.IGNORECASE) is not None
+    has_delivery = re.search(r"\bDELIVERY\b", blob, flags=re.IGNORECASE) is not None
+    has_incoterm = re.search(r"\bINCOTERM\b", blob, flags=re.IGNORECASE) is not None
+    has_handover = re.search(r"\bHANDOVER\s+DATE\b", blob, flags=re.IGNORECASE) is not None
+    has_transport = re.search(r"\bTRANSPORT\s+MODE\b", blob, flags=re.IGNORECASE) is not None
+    has_presentation = re.search(r"\bPRESENTATION\s+TYPE\b", blob, flags=re.IGNORECASE) is not None
+
+    has_article = re.search(r"\bARTICLE\b", blob, flags=re.IGNORECASE) is not None
+    has_option = re.search(r"\bOPTION\b", blob, flags=re.IGNORECASE) is not None
+    has_cost = (
+        re.search(r"\bCOST\b", blob, flags=re.IGNORECASE) is not None
+        or re.search(r"\bCOST\s*PRICE\b", blob, flags=re.IGNORECASE) is not None
+    )
+    has_qty = re.search(r"\bQ(TY|UANTITY)\b", blob, flags=re.IGNORECASE) is not None
+    has_unit_price = re.search(r"\bUNIT\s*PRICE\b", blob, flags=re.IGNORECASE) is not None
+
+    pd_score = 0
+    if has_logistic:
+        pd_score += 4
+    if has_delivery:
+        pd_score += 2
+    if has_incoterm:
+        pd_score += 2
+    if has_handover:
+        pd_score += 1
+    if has_transport:
+        pd_score += 1
+    if has_presentation:
+        pd_score += 1
+    if size_hits >= 2:
+        pd_score += 2
+    if has_colour:
+        pd_score += 1
+
+    grid_score = 0
+    if size_hits >= 2:
+        grid_score += 4
+    if has_colour:
+        grid_score += 2
+    if has_total:
+        grid_score += 1
+    if has_unit_lot:
+        grid_score += 1
+
+    line_item_score = 0
+    if has_article:
+        line_item_score += 3
+    if has_option:
+        line_item_score += 2
+    if has_cost or has_unit_price:
+        line_item_score += 2
+    if has_qty:
+        line_item_score += 1
+
+    if pd_score >= 6:
+        return "partial_deliveries_grid"
+    if grid_score >= 6 and pd_score < 5:
+        return "total_order_grid"
+    if line_item_score >= 5 and grid_score < 6:
+        return "line_item_table"
+    return None
+
+
 def _table_add_rows_matrix(tbl: Any) -> Any:
     if not isinstance(tbl, dict):
         return tbl
@@ -649,6 +944,16 @@ def _table_add_rows_matrix(tbl: Any) -> Any:
             pass
 
     tbl["rows_matrix"] = rows_matrix
+    try:
+        infer_fn = globals().get("_infer_table_kind_generic")
+        if callable(infer_fn):
+            tk = infer_fn(tbl)
+            if tk and not str(tbl.get("table_kind") or "").strip():
+                tbl["table_kind"] = tk
+                if str(tk).strip().lower() in {"total_order_grid", "partial_deliveries_grid"}:
+                    tbl["include_headers_in_rows_matrix"] = True
+    except Exception:
+        pass
 
     # Extract key/value pairs from form-like tables (Sales Order / Purchase Order headers)
     label_aliases = {
@@ -5087,12 +5392,53 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     pages_text: Optional[List[str]] = None
 
-    if filename.lower().endswith(".pdf"):
+    so_dbg_tables = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    is_pdf = filename.lower().endswith(".pdf") or _looks_like_pdf_bytes(file_bytes)
+
+    if is_pdf:
         pages_text = _pdf_text_pages(file_bytes)
         joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
         page_count = len(pages_text or [])
         pdf_tables_pages = _pdf_tables_pages_tabula(file_bytes, page_count) if page_count else None
         has_pdf_tables = any((isinstance(p, list) and len(p) > 0) for p in (pdf_tables_pages or []))
+
+        if so_dbg_tables:
+            try:
+                per_page_counts = [len(p or []) if isinstance(p, list) else 0 for p in (pdf_tables_pages or [])]
+                logger.info(
+                    "so_pdf_fastpath_input %s",
+                    json.dumps(
+                        {
+                            "event": "so_pdf_fastpath_input",
+                            "request_id": request_id,
+                            "doc_filename": filename,
+                            "page_count": page_count,
+                            "joined_len": len(joined or ""),
+                            "has_pdf_tables": bool(has_pdf_tables),
+                            "tabula_tables_per_page": per_page_counts,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            except Exception:
+                pass
+
+        if so_dbg_tables:
+            try:
+                per_page_counts = [len(p or []) if isinstance(p, list) else 0 for p in (pdf_tables_pages or [])]
+                _payload = {
+                    "event": "so_pdf_fastpath_input",
+                    "request_id": request_id,
+                    "doc_filename": filename,
+                    "page_count": page_count,
+                    "joined_len": len(joined or ""),
+                    "has_pdf_tables": bool(has_pdf_tables),
+                    "tabula_tables_per_page": per_page_counts,
+                }
+                logger.info("so_pdf_fastpath_input %s", json.dumps(_payload, ensure_ascii=False))
+            except Exception:
+                pass
 
         # Digital-PDF fast path:
         # - If embedded text exists, we can extract header fields from text.
@@ -5144,21 +5490,173 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                     tt = {"page": p.get("page"), **t}
                     try:
                         tt = _table_add_rows_matrix(tt)
+                        if str(tt.get("table_kind") or "").strip().lower() in {"total_order_grid", "partial_deliveries_grid"}:
+                            try:
+                                _normalize_size_grid_columns(tt)
+                            except Exception as e:
+                                if so_dbg_tables:
+                                    try:
+                                        rows0 = tt.get("rows") or []
+                                        row_keys = list((rows0[0] or {}).keys())[:12] if isinstance(rows0, list) and rows0 and isinstance(rows0[0], dict) else None
+                                        logger.info(
+                                            "so_pdf_fastpath_normalize_failed",
+                                            extra={
+                                                "request_id": request_id,
+                                                "page": tt.get("page"),
+                                                "table_kind": str(tt.get("table_kind") or ""),
+                                                "headers": [str(h or "") for h in (tt.get("headers") or [])[:12]],
+                                                "row0_keys": row_keys,
+                                                "error": str(e),
+                                            },
+                                        )
+                                    except Exception:
+                                        pass
                     except Exception:
                         pass
                     combined_tables.append(tt)
 
+            if so_dbg_tables:
+                try:
+                    debug_tables: List[Dict[str, Any]] = []
+                    for t in combined_tables[:12]:
+                        if not isinstance(t, dict):
+                            continue
+                        headers = t.get("headers") or []
+                        debug_tables.append(
+                            {
+                                "page": t.get("page"),
+                                "table_kind": str(t.get("table_kind") or ""),
+                                "headers": [str(h or "") for h in headers[:12]],
+                                "row_count": len(t.get("rows") or []) if isinstance(t.get("rows"), list) else None,
+                            }
+                        )
+                    _payload = {
+                        "event": "so_pdf_fastpath_tables_pre_filter",
+                        "request_id": request_id,
+                        "table_count": len(combined_tables),
+                        "tables": debug_tables,
+                    }
+                    logger.info("so_pdf_fastpath_tables_pre_filter %s", json.dumps(_payload, ensure_ascii=False))
+                except Exception:
+                    pass
+
             combined_tables = _filter_tables_for_sales_order(combined_tables)
             combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
             combined_tables = _filter_tables_for_sales_order(combined_tables)
+            try:
+                for t in combined_tables:
+                    if not isinstance(t, dict):
+                        continue
+                    if str(t.get("table_kind") or "").strip().lower() in {"total_order_grid", "partial_deliveries_grid"}:
+                        try:
+                            _normalize_size_grid_columns(t)
+                        except Exception as e:
+                            if so_dbg_tables:
+                                try:
+                                    rows0 = t.get("rows") or []
+                                    row_keys = list((rows0[0] or {}).keys())[:12] if isinstance(rows0, list) and rows0 and isinstance(rows0[0], dict) else None
+                                    logger.info(
+                                        "so_pdf_fastpath_normalize_failed %s",
+                                        json.dumps(
+                                            {
+                                                "event": "so_pdf_fastpath_normalize_failed",
+                                                "request_id": request_id,
+                                                "page": t.get("page"),
+                                                "table_kind": str(t.get("table_kind") or ""),
+                                                "headers": [str(h or "") for h in (t.get("headers") or [])[:12]],
+                                                "row0_keys": row_keys,
+                                                "error": str(e),
+                                            },
+                                            ensure_ascii=False,
+                                        ),
+                                    )
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
             combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
+
+            # Fallback: parse TOTAL ORDER from embedded text when Tabula tables are missing/misclassified.
+            try:
+                payload0 = _build_sales_order_payload(combined_tables)
+                grid0 = ((payload0.get("total_order") or {}).get("grid")) if isinstance(payload0, dict) else None
+                if not (isinstance(grid0, list) and len(grid0) > 0):
+                    parsed = _parse_total_order_from_text("\n".join(combined_texts))
+                    if isinstance(parsed, dict):
+                        unit_lot = parsed.pop("unit_lot", None)
+                        combined_tables.append(parsed)
+                        if unit_lot is not None:
+                            combined_tables.append(
+                                {
+                                    "page": 1,
+                                    "headers": ["COLOUR", "XS"],
+                                    "rows": [{"COLOUR": "UNIT LOT", "XS": str(unit_lot)}],
+                                    "table_kind": "total_order_grid",
+                                }
+                            )
+                        combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
+                        try:
+                            for t in combined_tables:
+                                if isinstance(t, dict) and str(t.get("table_kind") or "").strip().lower() == "total_order_grid":
+                                    _normalize_size_grid_columns(t)
+                        except Exception:
+                            pass
+                        if so_dbg_tables:
+                            try:
+                                _payload = {
+                                    "event": "so_pdf_fastpath_total_order_text_fallback_used",
+                                    "request_id": request_id,
+                                    "row_count": len(parsed.get("rows") or []),
+                                }
+                                logger.info("so_pdf_fastpath_total_order_text_fallback_used %s", json.dumps(_payload, ensure_ascii=False))
+                            except Exception:
+                                pass
+                    elif so_dbg_tables:
+                        try:
+                            snippet = "\n".join((combined_texts or [])[:1])
+                            logger.info(
+                                "so_pdf_fastpath_total_order_text_fallback_none %s",
+                                json.dumps(
+                                    {
+                                        "event": "so_pdf_fastpath_total_order_text_fallback_none",
+                                        "request_id": request_id,
+                                        "note": "_parse_total_order_from_text returned None",
+                                        "text_head": (snippet or "")[:800],
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            if so_dbg_tables:
+                try:
+                    kinds: Dict[str, int] = {}
+                    for t in combined_tables:
+                        if not isinstance(t, dict):
+                            continue
+                        k = str(t.get("table_kind") or "").strip() or "(none)"
+                        kinds[k] = int(kinds.get(k, 0)) + 1
+                    payload_dbg = _build_sales_order_payload(combined_tables)
+                    grid_len = len(((payload_dbg.get("total_order") or {}).get("grid")) or []) if isinstance(payload_dbg, dict) else None
+                    _payload = {
+                        "event": "so_pdf_fastpath_summary",
+                        "request_id": request_id,
+                        "table_kinds": kinds,
+                        "total_order_grid_len": grid_len,
+                    }
+                    logger.info("so_pdf_fastpath_summary %s", json.dumps(_payload, ensure_ascii=False))
+                except Exception:
+                    pass
 
             dt = time.perf_counter() - t0
             logger.info(
                 "ocr_extract_sync_done",
                 extra={
                     "request_id": request_id,
-                    "filename": filename,
+                    "doc_filename": filename,
                     "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
                     "page_count": len(all_pages),
                     "duration_sec": round(dt, 4),
@@ -5620,7 +6118,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         "ocr_extract_sync_done",
         extra={
             "request_id": request_id,
-            "filename": filename,
+            "doc_filename": filename,
             "engine": engine,
             "page_count": len(all_pages),
             "duration_sec": round(dt, 4),
@@ -5727,8 +6225,14 @@ async def ocr_extract(
             },
         )
 
+    so_dbg_tables = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
+
     # If PDF has embedded text (selectable text), prefer extracting it directly.
-    if filename.lower().endswith(".pdf"):
+    is_pdf = filename.lower().endswith(".pdf") or (isinstance(content_type, str) and "pdf" in content_type.lower()) or _looks_like_pdf_bytes(file_bytes)
+    if is_pdf:
+        # Normalize filename so downstream logic and logs clearly indicate PDF.
+        if not filename.lower().endswith(".pdf"):
+            filename = f"{filename}.pdf"
         pages_text = _pdf_text_pages(file_bytes)
         joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
         page_count = len(pages_text or [])
@@ -5787,17 +6291,156 @@ async def ocr_extract(
                         pass
                     combined_tables.append(tt)
 
+            if so_dbg_tables:
+                try:
+                    debug_tables: List[Dict[str, Any]] = []
+                    for t in combined_tables[:12]:
+                        if not isinstance(t, dict):
+                            continue
+                        headers = t.get("headers") or []
+                        debug_tables.append(
+                            {
+                                "page": t.get("page"),
+                                "table_kind": str(t.get("table_kind") or ""),
+                                "headers": [str(h or "") for h in headers[:12]],
+                                "row_count": len(t.get("rows") or []) if isinstance(t.get("rows"), list) else None,
+                            }
+                        )
+                    _payload = {
+                        "event": "so_pdf_fastpath_tables_pre_filter",
+                        "request_id": request_id,
+                        "table_count": len(combined_tables),
+                        "tables": debug_tables,
+                    }
+                    logger.info("so_pdf_fastpath_tables_pre_filter %s", json.dumps(_payload, ensure_ascii=False))
+                except Exception:
+                    pass
+
             combined_tables = _filter_tables_for_sales_order(combined_tables)
             combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
             combined_tables = _filter_tables_for_sales_order(combined_tables)
+            try:
+                for t in combined_tables:
+                    if not isinstance(t, dict):
+                        continue
+                    if str(t.get("table_kind") or "").strip().lower() in {"total_order_grid", "partial_deliveries_grid"}:
+                        try:
+                            _normalize_size_grid_columns(t)
+                        except Exception as e:
+                            if so_dbg_tables:
+                                try:
+                                    rows0 = t.get("rows") or []
+                                    row_keys = list((rows0[0] or {}).keys())[:12] if isinstance(rows0, list) and rows0 and isinstance(rows0[0], dict) else None
+                                    logger.info(
+                                        "so_pdf_fastpath_normalize_failed %s",
+                                        json.dumps(
+                                            {
+                                                "event": "so_pdf_fastpath_normalize_failed",
+                                                "request_id": request_id,
+                                                "page": t.get("page"),
+                                                "table_kind": str(t.get("table_kind") or ""),
+                                                "headers": [str(h or "") for h in (t.get("headers") or [])[:12]],
+                                                "row0_keys": row_keys,
+                                                "error": str(e),
+                                            },
+                                            ensure_ascii=False,
+                                        ),
+                                    )
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
             combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
+
+            # Fallback: parse TOTAL ORDER from embedded text when Tabula tables are missing/misclassified.
+            try:
+                payload0 = _build_sales_order_payload(combined_tables)
+                grid0 = ((payload0.get("total_order") or {}).get("grid")) if isinstance(payload0, dict) else None
+                if not (isinstance(grid0, list) and len(grid0) > 0):
+                    parsed = _parse_total_order_from_text("\n".join(combined_texts))
+                    if isinstance(parsed, dict):
+                        unit_lot = parsed.pop("unit_lot", None)
+                        combined_tables.append(parsed)
+                        if unit_lot is not None:
+                            combined_tables.append(
+                                {
+                                    "page": 1,
+                                    "headers": ["COLOUR", "XS"],
+                                    "rows": [{"COLOUR": "UNIT LOT", "XS": str(unit_lot)}],
+                                    "table_kind": "total_order_grid",
+                                }
+                            )
+                        combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
+                        try:
+                            for t in combined_tables:
+                                if isinstance(t, dict) and str(t.get("table_kind") or "").strip().lower() == "total_order_grid":
+                                    _normalize_size_grid_columns(t)
+                        except Exception:
+                            pass
+                        if so_dbg_tables:
+                            try:
+                                _payload = {
+                                    "event": "so_pdf_fastpath_total_order_text_fallback_used",
+                                    "request_id": request_id,
+                                    "row_count": len(parsed.get("rows") or []),
+                                }
+                                logger.info("so_pdf_fastpath_total_order_text_fallback_used %s", json.dumps(_payload, ensure_ascii=False))
+                            except Exception:
+                                pass
+                    elif so_dbg_tables:
+                        try:
+                            # Provide a small snippet around TOTAL ORDER for debugging
+                            full = "\n".join(combined_texts)
+                            m = re.search(r"(?i)TOTAL\s+ORDER", full)
+                            if m:
+                                a = max(0, m.start() - 300)
+                                b = min(len(full), m.start() + 900)
+                                snippet = full[a:b]
+                            else:
+                                snippet = full[:900]
+                            logger.info(
+                                "so_pdf_fastpath_total_order_text_fallback_none %s",
+                                json.dumps(
+                                    {
+                                        "event": "so_pdf_fastpath_total_order_text_fallback_none",
+                                        "request_id": request_id,
+                                        "note": "_parse_total_order_from_text returned None",
+                                        "snippet": snippet,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            if so_dbg_tables:
+                try:
+                    kinds: Dict[str, int] = {}
+                    for t in combined_tables:
+                        if not isinstance(t, dict):
+                            continue
+                        k = str(t.get("table_kind") or "").strip() or "(none)"
+                        kinds[k] = int(kinds.get(k, 0)) + 1
+                    payload_dbg = _build_sales_order_payload(combined_tables)
+                    grid_len = len(((payload_dbg.get("total_order") or {}).get("grid")) or []) if isinstance(payload_dbg, dict) else None
+                    _payload = {
+                        "event": "so_pdf_fastpath_summary",
+                        "request_id": request_id,
+                        "table_kinds": kinds,
+                        "total_order_grid_len": grid_len,
+                    }
+                    logger.info("so_pdf_fastpath_summary %s", json.dumps(_payload, ensure_ascii=False))
+                except Exception:
+                    pass
 
             dt = time.perf_counter() - t0
             logger.info(
                 "ocr_extract_done",
                 extra={
                     "request_id": request_id,
-                    "filename": filename,
+                    "doc_filename": filename,
                     "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
                     "page_count": len(all_pages),
                     "duration_sec": round(dt, 4),
@@ -6000,7 +6643,7 @@ async def ocr_extract(
         "ocr_extract_done",
         extra={
             "request_id": request_id,
-            "filename": filename,
+            "doc_filename": filename,
             "engine": engine,
             "page_count": len(all_pages),
             "duration_sec": round(dt, 4),
