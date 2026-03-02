@@ -7,6 +7,7 @@ import time
 import uuid
 import logging
 import sys
+import tempfile
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -50,6 +51,11 @@ try:
     import pdfplumber
 except Exception:  # pragma: no cover
     pdfplumber = None
+
+try:
+    import tabula
+except Exception:  # pragma: no cover
+    tabula = None
 
 
 logger = logging.getLogger("python_ocr")
@@ -160,6 +166,107 @@ def _parse_table_html(html: str) -> Optional[Dict[str, Any]]:
         "row_count": len(out_rows),
         "column_count": len(headers),
     }
+
+
+def _pdf_tables_pages_tabula(file_bytes: bytes, page_count: int) -> Optional[List[List[Dict[str, Any]]]]:
+    if tabula is None:
+        return None
+
+    if page_count <= 0:
+        return []
+
+    def _cell_str(v: Any) -> str:
+        if v is None:
+            return ""
+        try:
+            if isinstance(v, float) and np.isnan(v):
+                return ""
+        except Exception:
+            pass
+        return str(v).strip()
+
+    def _looks_like_header_row(row: List[str]) -> bool:
+        if not row:
+            return False
+        joined = " ".join([c for c in row if c]).strip()
+        if not joined:
+            return False
+        alpha = len(re.findall(r"[A-Z]", joined.upper()))
+        digits = len(re.findall(r"\d", joined))
+        return alpha >= 3 and alpha >= digits
+
+    def _df_to_table(df: Any) -> Optional[Dict[str, Any]]:
+        try:
+            values = df.values.tolist()
+        except Exception:
+            return None
+        if not isinstance(values, list) or not values:
+            return None
+
+        rm: List[List[str]] = []
+        for r in values:
+            if not isinstance(r, list):
+                continue
+            rr = [_cell_str(c) for c in r]
+            if any(c.strip() for c in rr):
+                rm.append(rr)
+        if not rm:
+            return None
+
+        cols = max((len(r) for r in rm), default=0)
+        if cols <= 0:
+            return None
+        rm = [r + [""] * (cols - len(r)) for r in rm]
+
+        headers: List[str]
+        start_idx = 0
+        if _looks_like_header_row(rm[0]):
+            headers = [c if c else f"COL_{i+1}" for i, c in enumerate(rm[0])]
+            start_idx = 1
+        else:
+            headers = [f"COL_{i+1}" for i in range(cols)]
+
+        rows: List[Dict[str, Any]] = []
+        for r in rm[start_idx:]:
+            row_obj: Dict[str, Any] = {}
+            for i, h in enumerate(headers):
+                if i < len(r):
+                    row_obj[h] = r[i]
+            if any(str(v or "").strip() for v in row_obj.values()):
+                rows.append(row_obj)
+
+        if not rows:
+            return None
+        return {"headers": headers, "rows": rows}
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as f:
+            f.write(file_bytes)
+            f.flush()
+
+            out: List[List[Dict[str, Any]]] = []
+            for p in range(1, page_count + 1):
+                try:
+                    dfs = tabula.read_pdf(
+                        f.name,
+                        pages=p,
+                        multiple_tables=True,
+                        guess=True,
+                        pandas_options={"header": None},
+                    )
+                except Exception:
+                    dfs = None
+
+                page_tables: List[Dict[str, Any]] = []
+                if isinstance(dfs, list):
+                    for df in dfs:
+                        t = _df_to_table(df)
+                        if isinstance(t, dict) and t.get("headers") and t.get("rows"):
+                            page_tables.append(t)
+                out.append(page_tables)
+            return out
+    except Exception:
+        return None
 
 
 def _polygon_to_bbox(polygon: List[Dict[str, float]]) -> Dict[str, float]:
@@ -1900,6 +2007,90 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
     except Exception:
         pass
 
+    def _infer_table_kind(tbl: Any) -> Optional[str]:
+        if not isinstance(tbl, dict):
+            return None
+        if str(tbl.get("table_kind") or "").strip():
+            return str(tbl.get("table_kind") or "").strip()
+
+        try:
+            headers = tbl.get("headers") or []
+            header_text = " ".join([str(h or "") for h in headers]).upper()
+        except Exception:
+            header_text = ""
+
+        try:
+            rm = tbl.get("rows_matrix") or []
+            head = " ".join([str(x or "") for row in rm[:6] if isinstance(row, list) for x in row]).upper() if isinstance(rm, list) else ""
+        except Exception:
+            head = ""
+
+        blob = (header_text + " " + head).strip()
+        if not blob:
+            return None
+
+        size_tokens = ["XXS", "XS", "S", "M", "L", "XL", "XXL"]
+        size_hits = sum(1 for tok in size_tokens if re.search(r"\b" + re.escape(tok) + r"\b", blob) is not None)
+
+        has_colour = re.search(r"\bCOLOU?R\b", blob, flags=re.IGNORECASE) is not None
+        has_total = re.search(r"\bTOTAL\b", blob, flags=re.IGNORECASE) is not None
+        has_logistic = re.search(r"\bLOGISTIC\s+ORDER\b", blob, flags=re.IGNORECASE) is not None
+        has_delivery = re.search(r"\bDELIVERY\b", blob, flags=re.IGNORECASE) is not None
+        has_incoterm = re.search(r"\bINCOTERM\b", blob, flags=re.IGNORECASE) is not None
+        has_handover = re.search(r"\bHANDOVER\s+DATE\b", blob, flags=re.IGNORECASE) is not None
+        has_transport = re.search(r"\bTRANSPORT\s+MODE\b", blob, flags=re.IGNORECASE) is not None
+        has_presentation = re.search(r"\bPRESENTATION\s+TYPE\b", blob, flags=re.IGNORECASE) is not None
+
+        has_article = re.search(r"\bARTICLE\b", blob, flags=re.IGNORECASE) is not None
+        has_option = re.search(r"\bOPTION\b", blob, flags=re.IGNORECASE) is not None
+        has_cost = re.search(r"\bCOST\b", blob, flags=re.IGNORECASE) is not None or re.search(r"\bCOST\s*PRICE\b", blob, flags=re.IGNORECASE) is not None
+        has_qty = re.search(r"\bQ(TY|UANTITY)\b", blob, flags=re.IGNORECASE) is not None
+        has_unit_price = re.search(r"\bUNIT\s*PRICE\b", blob, flags=re.IGNORECASE) is not None
+
+        pd_score = 0
+        if has_logistic:
+            pd_score += 4
+        if has_delivery:
+            pd_score += 2
+        if has_incoterm:
+            pd_score += 2
+        if has_handover:
+            pd_score += 1
+        if has_transport:
+            pd_score += 1
+        if has_presentation:
+            pd_score += 1
+        if size_hits >= 2:
+            pd_score += 2
+        if has_colour:
+            pd_score += 1
+
+        grid_score = 0
+        if size_hits >= 2:
+            grid_score += 4
+        if has_colour:
+            grid_score += 2
+        if has_total:
+            grid_score += 1
+
+        line_item_score = 0
+        if has_article:
+            line_item_score += 3
+        if has_option:
+            line_item_score += 2
+        if has_cost or has_unit_price:
+            line_item_score += 2
+        if has_qty:
+            line_item_score += 1
+
+        if pd_score >= 6:
+            return "partial_deliveries_grid"
+        if grid_score >= 6 and pd_score < 5:
+            return "total_order_grid"
+        if line_item_score >= 5 and grid_score < 6:
+            return "line_item_table"
+        return None
+
     def _is_partial_deliveries_like_table(t: Any) -> bool:
         if not isinstance(t, dict):
             return False
@@ -1979,6 +2170,24 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
             if reconstructed is None:
                 continue
 
+            try:
+                reconstructed = _table_add_rows_matrix(reconstructed)
+            except Exception:
+                pass
+
+            try:
+                inferred_kind = _infer_table_kind(reconstructed)
+                if inferred_kind and not str(reconstructed.get("table_kind") or "").strip():
+                    reconstructed["table_kind"] = inferred_kind
+                    reconstructed["include_headers_in_rows_matrix"] = True
+                    if inferred_kind in {"total_order_grid", "partial_deliveries_grid"}:
+                        try:
+                            _normalize_size_grid_columns(reconstructed)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             # If we already extracted Partial Deliveries grids, skip generic table regions that
             # represent the same section (they tend to merge metadata + multiple grids and break alignment).
             if pd_tables_found and _is_partial_deliveries_like_table(reconstructed):
@@ -1997,6 +2206,22 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
     reconstructed = _reconstruct_table_from_boxes(boxes)
     if reconstructed is None:
         return []
+    try:
+        reconstructed = _table_add_rows_matrix(reconstructed)
+    except Exception:
+        pass
+    try:
+        inferred_kind = _infer_table_kind(reconstructed)
+        if inferred_kind and not str(reconstructed.get("table_kind") or "").strip():
+            reconstructed["table_kind"] = inferred_kind
+            reconstructed["include_headers_in_rows_matrix"] = True
+            if inferred_kind in {"total_order_grid", "partial_deliveries_grid"}:
+                try:
+                    _normalize_size_grid_columns(reconstructed)
+                except Exception:
+                    pass
+    except Exception:
+        pass
     reconstructed["table_index"] = 1
     reconstructed["bbox"] = None
     return [reconstructed]
@@ -2337,6 +2562,86 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
     except Exception:
         pass
 
+    # 2b) LINE ITEM table (Article/Option/Cost) -> map into existing payload fields (no schema changes)
+    # Use only as fallback to fill missing values (especially cost_price) when no explicit metadata provides it.
+    try:
+        def _pick_col_idx(headers: List[str], pats: List[str]) -> Optional[int]:
+            for i, h in enumerate(headers):
+                hh = str(h or "")
+                for pat in pats:
+                    if re.search(pat, hh, flags=re.IGNORECASE):
+                        return i
+            return None
+
+        line_item_tables = [t for t in tables if isinstance(t, dict) and str(t.get("table_kind") or "").strip().lower() == "line_item_table"]
+        for t in line_item_tables:
+            rm = t.get("rows_matrix")
+            if not (isinstance(rm, list) and rm):
+                continue
+            # Determine header row
+            header_row: Optional[List[str]] = None
+            for rr in rm[:3]:
+                if isinstance(rr, list) and len(rr) >= 3:
+                    blob = " ".join([str(x or "") for x in rr])
+                    if re.search(r"\bARTICLE\b", blob, flags=re.IGNORECASE) or re.search(r"\bOPTION\b", blob, flags=re.IGNORECASE):
+                        header_row = [str(x or "").strip() for x in rr]
+                        break
+            if header_row is None and isinstance(rm[0], list):
+                header_row = [str(x or "").strip() for x in rm[0]]
+            if header_row is None:
+                continue
+
+            idx_cost = _pick_col_idx(header_row, [r"\bCOST\b", r"\bCOST\s*PRICE\b", r"\bUNIT\s*PRICE\b", r"\bPRICE\b"])
+            idx_article = _pick_col_idx(header_row, [r"\bARTICLE\b", r"\bART\b", r"\bSTYLE\b"])
+            idx_desc = _pick_col_idx(header_row, [r"\bDESCRIPTION\b", r"\bDESC\b"])
+
+            costs: List[str] = []
+            for rr in rm[1:]:
+                if not isinstance(rr, list):
+                    continue
+                if idx_cost is not None and int(idx_cost) < len(rr):
+                    c = str(rr[int(idx_cost)] or "").strip()
+                    if c:
+                        costs.append(c)
+
+            cost_val = ""
+            if costs:
+                # keep unique in order
+                seen = set()
+                uniq = []
+                for c in costs:
+                    if c not in seen:
+                        seen.add(c)
+                        uniq.append(c)
+                cost_val = ", ".join(uniq[:3]).strip()
+
+            # Fill header fields if missing
+            if _field_bad("article", payload["header"].get("article")) and idx_article is not None:
+                for rr in rm[1:]:
+                    if isinstance(rr, list) and int(idx_article) < len(rr):
+                        v = str(rr[int(idx_article)] or "").strip()
+                        if v:
+                            payload["header"]["article"] = v
+                            break
+            if _field_bad("description", payload["header"].get("description")) and idx_desc is not None:
+                for rr in rm[1:]:
+                    if isinstance(rr, list) and int(idx_desc) < len(rr):
+                        v = str(rr[int(idx_desc)] or "").strip()
+                        if v:
+                            payload["header"]["description"] = v
+                            break
+
+            # Fill cost_price into the first partial_delivery_headers meta if present, else defer (will be set when meta is created)
+            if cost_val:
+                if payload["partial_delivery_headers"]:
+                    if (payload["partial_delivery_headers"][0] or {}).get("cost_price") in (None, ""):
+                        payload["partial_delivery_headers"][0]["cost_price"] = cost_val
+                else:
+                    # stash into header for later pickup by partial delivery loop
+                    payload.setdefault("_tmp_cost_price", cost_val)
+    except Exception:
+        pass
+
     # 3) Partial Deliveries
     try:
         delivery_seq = 0
@@ -2359,6 +2664,12 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                 "presentation_type": None,
                 "cost_price": None,
             }
+
+            try:
+                if meta.get("cost_price") in (None, "") and payload.get("_tmp_cost_price"):
+                    meta["cost_price"] = payload.get("_tmp_cost_price")
+            except Exception:
+                pass
 
             def _parse_logistic_order(blob: str) -> Optional[str]:
                 try:
@@ -2513,6 +2824,12 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                     )
 
             payload["partial_delivery_headers"].append(meta)
+    except Exception:
+        pass
+
+    try:
+        if "_tmp_cost_price" in payload:
+            del payload["_tmp_cost_price"]
     except Exception:
         pass
 
@@ -4773,29 +5090,39 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     if filename.lower().endswith(".pdf"):
         pages_text = _pdf_text_pages(file_bytes)
         joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
-        # Only use embedded-text shortcut when a non-paddle engine is requested.
-        # For paddle-based engines we must rasterize pages to enable bbox/table reconstruction (e.g., TOTAL ORDER size grid).
-        if joined and len(joined) >= 50 and engine not in ("paddle", "paddle_structure", "paddle_ensemble"):
+        page_count = len(pages_text or [])
+        pdf_tables_pages = _pdf_tables_pages_tabula(file_bytes, page_count) if page_count else None
+        has_pdf_tables = any((isinstance(p, list) and len(p) > 0) for p in (pdf_tables_pages or []))
+
+        # Digital-PDF fast path:
+        # - If embedded text exists, we can extract header fields from text.
+        # - If Tabula can extract tables, we can also parse TOTAL ORDER / partial deliveries without OCR.
+        if ((joined and len(joined) >= 50) or has_pdf_tables):
             t_pdf = time.perf_counter()
             all_pages: List[Dict[str, Any]] = []
             combined_texts: List[str] = []
             for i, t in enumerate(pages_text or [], start=1):
                 pp_text = _postprocess_ocr_text(t or "")
-                pp_fields = _extract_fields_smart(pp_text, [])
+                page_tables: List[Dict[str, Any]] = []
+                if isinstance(pdf_tables_pages, list) and i - 1 < len(pdf_tables_pages):
+                    for tt in (pdf_tables_pages[i - 1] or []):
+                        if isinstance(tt, dict) and tt.get("headers") and tt.get("rows"):
+                            page_tables.append(tt)
+                pp_fields = _extract_fields_smart(pp_text, page_tables)
                 page_res: Dict[str, Any] = {
-                    "engine": "pdfplumber",
+                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
                     "page": i,
                     "text": pp_text,
-                    "tables": [],
+                    "tables": page_tables,
                     "fields": pp_fields,
                     "field_pairs": _fields_to_pairs(pp_fields),
                     "preprocess": {"enabled": False, "target": "pdf_text"},
                 }
                 try:
-                    page_res["tables"] = [_build_ai_kv_table_from_fields(pp_fields)]
+                    page_res["tables"] = [_build_ai_kv_table_from_fields(pp_fields)] + (page_res.get("tables") or [])
                 except Exception:
                     warnings.append({"page": i, "code": "AI_TABLE_BUILD_FAILED", "message": "Failed to build AI key/value table"})
-                    page_res["tables"] = []
+                    page_res["tables"] = page_res.get("tables") or []
                 all_pages.append(page_res)
                 if pp_text.strip():
                     combined_texts.append(pp_text.strip())
@@ -4811,13 +5138,28 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                     if isinstance(pair, dict) and pair.get("key") is not None and pair.get("value") is not None:
                         combined_field_pairs.append({"page": p.get("page"), **pair})
 
+            combined_tables: List[Dict[str, Any]] = []
+            for p in all_pages:
+                for t in (p.get("tables") or []):
+                    tt = {"page": p.get("page"), **t}
+                    try:
+                        tt = _table_add_rows_matrix(tt)
+                    except Exception:
+                        pass
+                    combined_tables.append(tt)
+
+            combined_tables = _filter_tables_for_sales_order(combined_tables)
+            combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
+            combined_tables = _filter_tables_for_sales_order(combined_tables)
+            combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
+
             dt = time.perf_counter() - t0
             logger.info(
                 "ocr_extract_sync_done",
                 extra={
                     "request_id": request_id,
                     "filename": filename,
-                    "engine": "pdfplumber",
+                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
                     "page_count": len(all_pages),
                     "duration_sec": round(dt, 4),
                     "pdf_text_sec": round(time.perf_counter() - t_pdf, 4),
@@ -4828,7 +5170,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "document_meta": {
                     "request_id": request_id,
                     "filename": filename,
-                    "engine": "pdfplumber",
+                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
                     "preprocess": {"enabled": False, "mode": None, "target": "pdf_text"},
                     "page_count": len(all_pages),
                     "timings": {"total_sec": round(dt, 4)},
@@ -4836,12 +5178,13 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "warnings": warnings,
                 "errors": errors,
                 "filename": filename,
-                "engine": "pdfplumber",
+                "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
                 "pages": all_pages,
                 "text": "\n\n".join(combined_texts).strip(),
-                "tables": [],
+                "tables": combined_tables,
                 "fields": combined_fields,
                 "field_pairs": combined_field_pairs,
+                "sales_order_payload": _build_sales_order_payload(combined_tables),
             }
 
     images_bgr = _images_from_upload(filename, file_bytes)
@@ -5177,6 +5520,45 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
 
     try:
+        if str(os.getenv("DEBUG_TABLE_KIND_DUMP") or "").strip() in {"1", "true", "True", "YES", "yes"}:
+            try:
+                dump: List[Dict[str, Any]] = []
+                for t in combined_tables:
+                    if not isinstance(t, dict):
+                        continue
+                    rm = t.get("rows_matrix")
+                    rm_head = rm[:6] if isinstance(rm, list) else None
+                    dump.append(
+                        {
+                            "page": t.get("page"),
+                            "table_index": t.get("table_index"),
+                            "table_kind": t.get("table_kind"),
+                            "headers": t.get("headers"),
+                            "rows_matrix_head": rm_head,
+                        }
+                    )
+                msg = json.dumps(dump, ensure_ascii=False)
+                logger.info("DEBUG_TABLE_KIND_DUMP request_id=%s %s", request_id, msg)
+                try:
+                    chunk = 8000
+                    total_parts = (len(msg) + chunk - 1) // chunk
+                    print(f"DEBUG_TABLE_KIND_DUMP_PRINT request_id={request_id} BEGIN parts={total_parts}")
+                    for i in range(0, len(msg), chunk):
+                        part_no = i // chunk + 1
+                        part = msg[i : i + chunk]
+                        print(
+                            f"DEBUG_TABLE_KIND_DUMP_PRINT request_id={request_id} part={part_no}/{total_parts} {part}"
+                        )
+                    print(f"DEBUG_TABLE_KIND_DUMP_PRINT request_id={request_id} END")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
         if str(os.getenv("DEBUG_PARTIAL_DELIVERIES") or "").strip() in {"1", "true", "True", "YES", "yes"}:
             try:
                 dbg_sales = str(os.getenv("DEBUG_SALES_ORDER_PAYLOAD") or "").strip()
@@ -5349,28 +5731,37 @@ async def ocr_extract(
     if filename.lower().endswith(".pdf"):
         pages_text = _pdf_text_pages(file_bytes)
         joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
-        # Only use embedded-text shortcut when a non-paddle engine is requested.
-        # For paddle-based engines we must rasterize pages to enable bbox/table reconstruction (e.g., TOTAL ORDER size grid).
-        if joined and len(joined) >= 50 and engine not in ("paddle", "paddle_structure", "paddle_ensemble"):
+        page_count = len(pages_text or [])
+        pdf_tables_pages = _pdf_tables_pages_tabula(file_bytes, page_count) if page_count else None
+        has_pdf_tables = any((isinstance(p, list) and len(p) > 0) for p in (pdf_tables_pages or []))
+
+        # Digital-PDF fast path (pdfplumber text + Tabula tables) for any engine.
+        # Fall back to OCR if there is no usable embedded text and no tables.
+        if ((joined and len(joined) >= 50) or has_pdf_tables):
             all_pages: List[Dict[str, Any]] = []
             combined_texts: List[str] = []
             for i, t in enumerate(pages_text or [], start=1):
                 pp_text = _postprocess_ocr_text(t or "")
-                pp_fields = _extract_fields_smart(pp_text, [])
+                page_tables: List[Dict[str, Any]] = []
+                if isinstance(pdf_tables_pages, list) and i - 1 < len(pdf_tables_pages):
+                    for tt in (pdf_tables_pages[i - 1] or []):
+                        if isinstance(tt, dict) and tt.get("headers") and tt.get("rows"):
+                            page_tables.append(tt)
+                pp_fields = _extract_fields_smart(pp_text, page_tables)
                 page_res: Dict[str, Any] = {
-                    "engine": "pdfplumber",
+                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
                     "page": i,
                     "text": pp_text,
-                    "tables": [],
+                    "tables": page_tables,
                     "fields": pp_fields,
                     "field_pairs": _fields_to_pairs(pp_fields),
                     "preprocess": {"enabled": False, "target": "pdf_text"},
                 }
                 try:
-                    page_res["tables"] = [_build_ai_kv_table_from_fields(pp_fields)]
+                    page_res["tables"] = [_build_ai_kv_table_from_fields(pp_fields)] + (page_res.get("tables") or [])
                 except Exception:
                     warnings.append({"page": i, "code": "AI_TABLE_BUILD_FAILED", "message": "Failed to build AI key/value table"})
-                    page_res["tables"] = []
+                    page_res["tables"] = page_res.get("tables") or []
                 all_pages.append(page_res)
                 if pp_text.strip():
                     combined_texts.append(pp_text.strip())
@@ -5396,6 +5787,9 @@ async def ocr_extract(
                         pass
                     combined_tables.append(tt)
 
+            combined_tables = _filter_tables_for_sales_order(combined_tables)
+            combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
+            combined_tables = _filter_tables_for_sales_order(combined_tables)
             combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
 
             dt = time.perf_counter() - t0
@@ -5404,7 +5798,7 @@ async def ocr_extract(
                 extra={
                     "request_id": request_id,
                     "filename": filename,
-                    "engine": "pdfplumber",
+                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
                     "page_count": len(all_pages),
                     "duration_sec": round(dt, 4),
                     "warnings": len(warnings),
@@ -5418,7 +5812,7 @@ async def ocr_extract(
                     "document_meta": {
                         "request_id": request_id,
                         "filename": filename,
-                        "engine": "pdfplumber",
+                        "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
                         "preprocess": {"enabled": False, "mode": None, "target": "pdf_text"},
                         "page_count": len(all_pages),
                         "timings": {"total_sec": round(dt, 4)},
@@ -5426,7 +5820,7 @@ async def ocr_extract(
                     "warnings": warnings,
                     "errors": errors,
                     "filename": filename,
-                    "engine": "pdfplumber",
+                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
                     "pages": all_pages,
                     "text": "\n\n".join(combined_texts).strip(),
                     "tables": combined_tables,
