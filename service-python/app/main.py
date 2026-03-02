@@ -5034,6 +5034,14 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         if str(os.getenv("DEBUG_PARTIAL_DELIVERIES") or "").strip() in {"1", "true", "True", "YES", "yes"}:
+            try:
+                dbg_sales = str(os.getenv("DEBUG_SALES_ORDER_PAYLOAD") or "").strip()
+                print(
+                    f"DEBUG_ENV_SNAPSHOT request_id={request_id} DEBUG_PARTIAL_DELIVERIES=1 DEBUG_SALES_ORDER_PAYLOAD={dbg_sales!r}"
+                )
+                sys.stdout.flush()
+            except Exception:
+                pass
             pd = []
             for t in combined_tables:
                 if not isinstance(t, dict):
@@ -5463,6 +5471,382 @@ async def ocr_extract(
         },
     )
 
+    sales_order_payload = _build_sales_order_payload(combined_tables)
+
+    try:
+        if str(os.getenv("DEBUG_SALES_ORDER_TRACE") or "").strip() in {"1", "true", "True", "YES", "yes"}:
+            try:
+                def _safe_norm_key(s: Any) -> str:
+                    try:
+                        return _norm_key(str(s or ""))
+                    except Exception:
+                        return str(s or "").strip().lower()
+
+                def _canon_header_payload_key(label: str) -> str:
+                    lk0 = _safe_norm_key(label)
+                    lk = lk0
+                    if lk0 in {"ordernr", "order_nr", "orderno", "order"}:
+                        lk = "ordernr"
+                    elif lk0 in {"date", "orderdate", "dateoforder"}:
+                        lk = "date"
+                    elif lk0 in {"season"}:
+                        lk = "season"
+                    elif lk0 in {"buyer"}:
+                        lk = "buyer"
+                    elif lk0 in {"purchaser"}:
+                        lk = "purchaser"
+                    elif lk0 in {"supplier"}:
+                        lk = "supplier"
+                    elif lk0 in {"sendto", "send_to", "send"}:
+                        lk = "sendto"
+                    elif lk0 in {"paymentterms", "payment_terms", "termsofpayment", "terms"}:
+                        lk = "paymentterms"
+                    elif lk0 in {"supplierref", "supplier_ref"}:
+                        lk = "supplierref"
+                    elif lk0 in {"article"}:
+                        lk = "article"
+                    elif lk0 in {"description"}:
+                        lk = "description"
+                    elif lk0 in {"marketoforigin", "market_origin", "marketof"}:
+                        lk = "marketoforigin"
+                    elif lk0 in {"pvp"}:
+                        lk = "pvp"
+                    elif lk0 in {"compositionsinformation", "compositioninformation", "compositions", "composition"}:
+                        lk = "compositionsinformation"
+                    elif lk0 in {"careinstructions", "care"}:
+                        lk = "careinstructions"
+                    elif lk0 in {"hangtaglabel"}:
+                        lk = "hangtaglabel"
+                    elif lk0 in {"mainlabel"}:
+                        lk = "mainlabel"
+                    elif lk0 in {"externalfabric"}:
+                        lk = "externalfabric"
+                    elif lk0 in {"hanging"}:
+                        lk = "hanging"
+                    elif lk0 in {"totalorder", "total"}:
+                        lk = "totalorder"
+                    return lk
+
+                def _canon_partial_payload_key(label: str) -> str:
+                    lk0 = _safe_norm_key(label)
+                    lk = lk0
+                    if lk0 in {"logisticorder", "logisticsorder"}:
+                        lk = "logistic_order"
+                    elif lk0 in {"handoverdate"}:
+                        lk = "handover_date"
+                    elif lk0 in {"transportmode", "transportationmode"}:
+                        lk = "transport_mode"
+                    elif lk0 in {"presentationtype"}:
+                        lk = "presentation_type"
+                    elif lk0 in {"costprice"}:
+                        lk = "cost_price"
+                    elif lk0 in {"delivery"}:
+                        lk = "delivery"
+                    elif lk0 in {"incoterm"}:
+                        lk = "incoterm"
+                    elif lk0 in {"from"}:
+                        lk = "from"
+                    return lk
+
+                candidates_header: List[Dict[str, Any]] = []
+                candidates_partial_meta: List[Dict[str, Any]] = []
+                candidates_partial_rows: List[Dict[str, Any]] = []
+
+                for t in combined_tables:
+                    if not isinstance(t, dict):
+                        continue
+                    page = t.get("page")
+                    table_index = t.get("table_index")
+                    tk = str(t.get("table_kind") or "").strip().lower()
+
+                    if t.get("headers") == ["key", "value"]:
+                        kv_all = t.get("kv_pairs_all")
+                        if isinstance(kv_all, list):
+                            for p in kv_all:
+                                if not isinstance(p, dict):
+                                    continue
+                                k = str(p.get("key") or "").strip()
+                                v = str(p.get("value") or "").strip()
+                                if k:
+                                    payload_key = _canon_header_payload_key(k)
+                                    candidates_header.append(
+                                        {
+                                            "page": page,
+                                            "table_index": table_index,
+                                            "source": "ai_kv",
+                                            "key": k,
+                                            "key_norm": _safe_norm_key(k),
+                                            "payload_key": payload_key,
+                                            "value": v,
+                                        }
+                                    )
+                        else:
+                            rm = t.get("rows_matrix")
+                            if isinstance(rm, list):
+                                for r in rm:
+                                    if not (isinstance(r, list) and len(r) >= 2):
+                                        continue
+                                    k = str(r[0] or "").strip()
+                                    v = str(r[1] or "").strip()
+                                    if k and k.lower() != "key":
+                                        payload_key = _canon_header_payload_key(k)
+                                        candidates_header.append(
+                                            {
+                                                "page": page,
+                                                "table_index": table_index,
+                                                "source": "ai_kv_rows_matrix",
+                                                "key": k,
+                                                "key_norm": _safe_norm_key(k),
+                                                "payload_key": payload_key,
+                                                "value": v,
+                                            }
+                                        )
+
+                    # Also collect generic rows_matrix candidates from non-kv tables (helps find missed header kv)
+                    if t.get("headers") != ["key", "value"]:
+                        rm = t.get("rows_matrix")
+                        if isinstance(rm, list):
+                            for rr in rm[:30]:
+                                if not (isinstance(rr, list) and len(rr) >= 2):
+                                    continue
+                                k = str(rr[0] or "").strip()
+                                v = str(rr[1] or "").strip()
+                                if not k or k.lower() in {"key", "variable"}:
+                                    continue
+                                # Skip obvious table headers
+                                if re.fullmatch(r"(?i)COLOU?R|XS|S|M|L|XL|TOTAL", k.strip()):
+                                    continue
+                                payload_key = _canon_header_payload_key(k)
+                                candidates_header.append(
+                                    {
+                                        "page": page,
+                                        "table_index": table_index,
+                                        "source": "rows_matrix",
+                                        "key": k,
+                                        "key_norm": _safe_norm_key(k),
+                                        "payload_key": payload_key,
+                                        "value": v,
+                                    }
+                                )
+
+                    if tk == "partial_deliveries_grid":
+                        pre = t.get("pre_rows_matrix")
+                        if isinstance(pre, list):
+                            for r in pre:
+                                if not (isinstance(r, list) and len(r) >= 2):
+                                    continue
+                                k = str(r[0] or "").strip()
+                                v = str(r[1] or "").strip()
+                                if k:
+                                    payload_key = _canon_partial_payload_key(k)
+                                    candidates_partial_meta.append(
+                                        {
+                                            "page": page,
+                                            "table_index": table_index,
+                                            "source": "partial_pre_rows_matrix",
+                                            "key": k,
+                                            "key_norm": _safe_norm_key(k),
+                                            "payload_key": payload_key,
+                                            "value": v,
+                                        }
+                                    )
+
+                        # Include rows that were filtered out (TOTAL, COST PRICE) for trace visibility
+                        rows = t.get("rows")
+                        if isinstance(rows, list):
+                            for r in rows:
+                                if not isinstance(r, dict):
+                                    continue
+                                c0 = str(r.get("COLOUR") or "").strip()
+                                xs0 = str(r.get("XS") or "").strip()
+                                if not c0:
+                                    continue
+                                kind = "line"
+                                payload_key = ""
+                                reason = ""
+                                if re.fullmatch(r"TOTAL", c0, flags=re.IGNORECASE):
+                                    kind = "summary"
+                                    reason = "filtered_total_row"
+                                if re.search(r"\bCOST\s*PRICE\b", c0, flags=re.IGNORECASE):
+                                    kind = "meta"
+                                    payload_key = "cost_price"
+                                    reason = "meta_row_cost_price"
+                                candidates_partial_rows.append(
+                                    {
+                                        "page": page,
+                                        "table_index": table_index,
+                                        "source": "partial_rows",
+                                        "key": c0,
+                                        "key_norm": _safe_norm_key(c0),
+                                        "payload_key": payload_key,
+                                        "value": xs0,
+                                        "kind": kind,
+                                        "reason": reason,
+                                    }
+                                )
+
+                payload_header = (sales_order_payload or {}).get("header") or {}
+                used_header_keys = {_safe_norm_key(k) for k in payload_header.keys()}
+
+                used_header_payload_keys = {_canon_header_payload_key(k) for k in payload_header.keys()}
+
+                used_partial_meta_keys: set[str] = set()
+                for mh in (sales_order_payload or {}).get("partial_delivery_headers") or []:
+                    if not isinstance(mh, dict):
+                        continue
+                    for k, v in mh.items():
+                        if k == "delivery_seq":
+                            continue
+                        if v not in (None, ""):
+                            used_partial_meta_keys.add(_safe_norm_key(k))
+
+                used_partial_payload_keys = set()
+                for mh in (sales_order_payload or {}).get("partial_delivery_headers") or []:
+                    if not isinstance(mh, dict):
+                        continue
+                    for k, v in mh.items():
+                        if k == "delivery_seq":
+                            continue
+                        if v not in (None, ""):
+                            used_partial_payload_keys.add(_safe_norm_key(k))
+
+                def _classify_header_candidate(c: Dict[str, Any]) -> Dict[str, Any]:
+                    out = dict(c)
+                    v = str(out.get("value") or "").strip()
+                    pk = str(out.get("payload_key") or "").strip()
+                    if not v:
+                        out["status"] = "skipped"
+                        out["reason"] = "empty_value"
+                        return out
+                    if pk and pk in used_header_payload_keys:
+                        out["status"] = "used"
+                        out["reason"] = "mapped_to_payload"
+                        return out
+                    if out.get("key_norm") in used_header_keys:
+                        out["status"] = "used"
+                        out["reason"] = "exact_key_used"
+                        return out
+                    out["status"] = "unused"
+                    out["reason"] = "not_mapped_or_not_used"
+                    return out
+
+                header_candidates_classified = [_classify_header_candidate(c) for c in candidates_header]
+                unused_header = [c for c in header_candidates_classified if c.get("status") == "unused"]
+
+                def _classify_partial_meta_candidate(c: Dict[str, Any]) -> Dict[str, Any]:
+                    out = dict(c)
+                    v = str(out.get("value") or "").strip()
+                    pk = str(out.get("payload_key") or "").strip()
+                    if not v:
+                        out["status"] = "skipped"
+                        out["reason"] = "empty_value"
+                        return out
+                    if pk and _safe_norm_key(pk) in used_partial_payload_keys:
+                        out["status"] = "used"
+                        out["reason"] = "mapped_to_payload"
+                        return out
+                    out["status"] = "unused"
+                    out["reason"] = "not_mapped_or_not_used"
+                    return out
+
+                partial_meta_candidates_classified = [_classify_partial_meta_candidate(c) for c in candidates_partial_meta]
+                unused_partial_meta = [c for c in partial_meta_candidates_classified if c.get("status") == "unused"]
+
+                def _classify_partial_row_candidate(c: Dict[str, Any]) -> Dict[str, Any]:
+                    out = dict(c)
+                    v = str(out.get("value") or "").strip()
+                    pk = str(out.get("payload_key") or "").strip()
+                    if out.get("reason") == "filtered_total_row":
+                        out["status"] = "skipped"
+                        return out
+                    if pk and _safe_norm_key(pk) in used_partial_payload_keys and v:
+                        out["status"] = "used"
+                        out["reason"] = out.get("reason") or "mapped_to_payload"
+                        return out
+                    if not v:
+                        out["status"] = "skipped"
+                        out["reason"] = out.get("reason") or "empty_value"
+                        return out
+                    out["status"] = "unused"
+                    out["reason"] = out.get("reason") or "not_used"
+                    return out
+
+                partial_row_candidates_classified = [_classify_partial_row_candidate(c) for c in candidates_partial_rows]
+
+                trace = {
+                    "header": {
+                        "used_keys": sorted(list(used_header_keys)),
+                        "used_payload_keys": sorted(list(used_header_payload_keys)),
+                        "candidates": header_candidates_classified,
+                        "unused_candidates": unused_header,
+                    },
+                    "partial_delivery_meta": {
+                        "used_keys": sorted(list(used_partial_meta_keys)),
+                        "used_payload_keys": sorted(list(used_partial_payload_keys)),
+                        "candidates": partial_meta_candidates_classified,
+                        "unused_candidates": unused_partial_meta,
+                    },
+                    "partial_delivery_rows": {
+                        "candidates": partial_row_candidates_classified,
+                        "unused_candidates": [c for c in partial_row_candidates_classified if c.get("status") == "unused"],
+                        "skipped_candidates": [c for c in partial_row_candidates_classified if c.get("status") == "skipped"],
+                    },
+                }
+
+                trace_msg = json.dumps(trace, ensure_ascii=False)
+                logger.info("DEBUG_SALES_ORDER_TRACE request_id=%s %s", request_id, trace_msg)
+                try:
+                    chunk = 8000
+                    total_parts = (len(trace_msg) + chunk - 1) // chunk
+                    print(f"DEBUG_SALES_ORDER_TRACE_PRINT request_id={request_id} BEGIN parts={total_parts}")
+                    for i in range(0, len(trace_msg), chunk):
+                        part_no = i // chunk + 1
+                        part = trace_msg[i : i + chunk]
+                        print(
+                            f"DEBUG_SALES_ORDER_TRACE_PRINT request_id={request_id} part={part_no}/{total_parts} {part}"
+                        )
+                    print(f"DEBUG_SALES_ORDER_TRACE_PRINT request_id={request_id} END")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        if str(os.getenv("DEBUG_SALES_ORDER_PAYLOAD") or "").strip() in {"1", "true", "True", "YES", "yes"}:
+            msg = json.dumps(sales_order_payload, ensure_ascii=False)
+            logger.info("DEBUG_SALES_ORDER_PAYLOAD request_id=%s %s", request_id, msg)
+            try:
+                try:
+                    header_only = json.dumps({"header": (sales_order_payload or {}).get("header")}, ensure_ascii=False)
+                    print(f"DEBUG_SALES_ORDER_HEADER_PRINT request_id={request_id} {header_only}")
+                except Exception:
+                    pass
+
+                # Print in chunks to avoid console line limits while still printing full JSON.
+                chunk = 8000
+                total_parts = (len(msg) + chunk - 1) // chunk
+                try:
+                    head_snip = msg[:300]
+                    print(f"DEBUG_SALES_ORDER_PAYLOAD_PRINT request_id={request_id} HEAD {head_snip}")
+                except Exception:
+                    pass
+                print(f"DEBUG_SALES_ORDER_PAYLOAD_PRINT request_id={request_id} BEGIN parts={total_parts}")
+                for i in range(0, len(msg), chunk):
+                    part_no = i // chunk + 1
+                    part = msg[i : i + chunk]
+                    print(
+                        f"DEBUG_SALES_ORDER_PAYLOAD_PRINT request_id={request_id} part={part_no}/{total_parts} {part}"
+                    )
+                print(f"DEBUG_SALES_ORDER_PAYLOAD_PRINT request_id={request_id} END")
+                sys.stdout.flush()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return JSONResponse(
         {
             "schema_version": "1.0",
@@ -5483,6 +5867,6 @@ async def ocr_extract(
             "tables": combined_tables,
             "fields": combined_fields,
             "field_pairs": combined_field_pairs,
-            "sales_order_payload": _build_sales_order_payload(combined_tables),
+            "sales_order_payload": sales_order_payload,
         }
     )
