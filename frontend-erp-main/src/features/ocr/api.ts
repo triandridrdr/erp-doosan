@@ -46,7 +46,7 @@ export const ocrPythonApi = {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await client.post<OcrResponse>('/api/v1/ocr/python/extract', formData, {
+    const response = await client.post<OcrResponse>('/api/v1/ocr/python/extract?view=json', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
       },

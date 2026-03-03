@@ -368,111 +368,126 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                     </span>
                   </div>
 
-                  {!!extractResult.data.salesOrderPayload && (
-                    <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
-                      <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
-                        <h3 className='font-semibold text-gray-900'>Sales Order JSON Payload</h3>
-                        <p className='text-xs text-gray-500 mt-1'>Request body for ERP insert</p>
-                      </div>
-                      <div className='p-4'>
-                        <details className='group'>
-                          <summary className='text-sm font-medium text-gray-700 cursor-pointer list-none flex items-center'>
-                            <span>View JSON</span>
-                            <span className='ml-2 transition group-open:rotate-180 text-gray-400'>▼</span>
-                          </summary>
-                          <pre className='mt-3 text-xs font-mono whitespace-pre-wrap bg-gray-50 border border-gray-200 rounded p-3 max-h-96 overflow-y-auto'>
-                            {JSON.stringify(extractResult.data.salesOrderPayload, null, 2)}
-                          </pre>
-                        </details>
-                      </div>
-                    </div>
-                  )}
-
-                  <div>
-                    <h3 className='text-sm font-medium text-gray-700 mb-2'>Full text</h3>
-                    <div className='bg-gray-50 p-4 rounded-lg text-sm text-gray-800 whitespace-pre-wrap border border-gray-100 max-h-96 overflow-y-auto font-mono'>
-                      {extractResult.data.extractedText}
-                    </div>
-                  </div>
-
-                  {extractResult.data.tables && (
-                    <div className='space-y-6'>
-                      {extractResult.data.tables && extractResult.data.tables.length > 0 && (
-                        <div className='space-y-4'>
-                          <h3 className='font-bold text-lg text-gray-900 flex items-center'>
-                            <TableIcon className='w-5 h-5 mr-2' />
-                            AI Tables ({extractResult.data.tables.length})
-                          </h3>
-                          <div className='grid grid-cols-1 gap-6'>
-                            {extractResult.data.tables.map((table: TableDto, idx: number) => (
-                              <div key={idx} className='bg-white rounded-lg border border-gray-200 overflow-hidden shadow-sm'>
-                                <div className='bg-gray-50 px-4 py-2 border-b border-gray-100 text-xs font-medium text-gray-500 uppercase tracking-wider'>
-                                  Table {idx + 1}
-                                </div>
-                                <div className='overflow-x-auto max-h-[70vh]'>
-                                  <table className='min-w-max w-full divide-y divide-gray-200'>
-                                    <tbody className='bg-white divide-y divide-gray-200'>
-                                      {table.rows.map((row, rIdx) => (
-                                        <tr key={rIdx} className={rIdx === 0 ? 'bg-gray-50/50' : ''}>
-                                          {row.map((cell, cIdx) => (
-                                            <td
-                                              key={cIdx}
-                                              className={`px-4 py-3 text-sm text-gray-700 whitespace-nowrap border-r border-gray-100 last:border-r-0 ${
-                                                rIdx === 0 ? 'font-semibold text-gray-900' : ''
-                                              }`}
-                                            >
-                                              {cell}
-                                            </td>
-                                          ))}
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* 블록 상세 보기 */}
-                  <details className='group'>
-                    <summary className='text-sm font-medium text-gray-700 cursor-pointer mb-2 list-none flex items-center'>
-                      <span>Detected blocks ({extractResult.data.blocks.length}) - view details</span>
-                      <span className='ml-2 transition group-open:rotate-180 text-gray-400'>▼</span>
-                    </summary>
-
-                    <div className='border border-gray-200 rounded-lg overflow-hidden mt-2'>
-                      <div className='max-h-60 overflow-y-auto divide-y divide-gray-100'>
-                        {extractResult.data.blocks.map((block, index) => (
-                          <div
-                            key={index}
-                            className='p-3 hover:bg-gray-50 transition-colors flex justify-between items-start'
-                          >
-                            <p className='text-sm text-gray-900 flex-1 mr-4'>{block.text}</p>
-                            <div className='flex flex-col items-end'>
-                              <span className='text-xs bg-gray-100 px-2 py-0.5 rounded text-gray-600 font-medium'>
-                                {block.blockType}
-                              </span>
-                              <span
-                                className={`text-xs mt-1 ${
-                                  block.confidence > 90
-                                    ? 'text-green-600'
-                                    : block.confidence > 70
-                                      ? 'text-yellow-600'
-                                      : 'text-red-600'
-                                }`}
-                              >
-                                {block.confidence.toFixed(1)}%
-                              </span>
+                  {(() => {
+                    const hasSalesOrderPayload = !!extractResult.data.salesOrderPayload;
+                    return (
+                      <>
+                        {!!extractResult.data.salesOrderPayload && (
+                          <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
+                            <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
+                              <h3 className='font-semibold text-gray-900'>Sales Order JSON Payload</h3>
+                              <p className='text-xs text-gray-500 mt-1'>Request body for ERP insert</p>
+                            </div>
+                            <div className='p-4'>
+                              <details className='group' open>
+                                <summary className='text-sm font-medium text-gray-700 cursor-pointer list-none flex items-center'>
+                                  <span>View JSON</span>
+                                  <span className='ml-2 transition group-open:rotate-180 text-gray-400'>▼</span>
+                                </summary>
+                                <pre className='mt-3 text-xs font-mono whitespace-pre-wrap bg-gray-50 border border-gray-200 rounded p-3 max-h-96 overflow-y-auto'>
+                                  {JSON.stringify(extractResult.data.salesOrderPayload, null, 2)}
+                                </pre>
+                              </details>
                             </div>
                           </div>
-                        ))}
-                      </div>
-                    </div>
-                  </details>
+                        )}
+
+                        {/* Only show verbose OCR outputs when salesOrderPayload is NOT present */}
+                        {!hasSalesOrderPayload && (
+                          <>
+                            <div>
+                              <h3 className='text-sm font-medium text-gray-700 mb-2'>Full text</h3>
+                              <div className='bg-gray-50 p-4 rounded-lg text-sm text-gray-800 whitespace-pre-wrap border border-gray-100 max-h-96 overflow-y-auto font-mono'>
+                                {extractResult.data.extractedText}
+                              </div>
+                            </div>
+
+                            {extractResult.data.tables && (
+                              <div className='space-y-6'>
+                                {extractResult.data.tables && extractResult.data.tables.length > 0 && (
+                                  <div className='space-y-4'>
+                                    <h3 className='font-bold text-lg text-gray-900 flex items-center'>
+                                      <TableIcon className='w-5 h-5 mr-2' />
+                                      AI Tables ({extractResult.data.tables.length})
+                                    </h3>
+                                    <div className='grid grid-cols-1 gap-6'>
+                                      {extractResult.data.tables.map((table: TableDto, idx: number) => (
+                                        <div
+                                          key={idx}
+                                          className='bg-white rounded-lg border border-gray-200 overflow-hidden shadow-sm'
+                                        >
+                                          <div className='bg-gray-50 px-4 py-2 border-b border-gray-100 text-xs font-medium text-gray-500 uppercase tracking-wider'>
+                                            Table {idx + 1}
+                                          </div>
+                                          <div className='overflow-x-auto max-h-[70vh]'>
+                                            <table className='min-w-max w-full divide-y divide-gray-200'>
+                                              <tbody className='bg-white divide-y divide-gray-200'>
+                                                {table.rows.map((row, rIdx) => (
+                                                  <tr key={rIdx} className={rIdx === 0 ? 'bg-gray-50/50' : ''}>
+                                                    {row.map((cell, cIdx) => (
+                                                      <td
+                                                        key={cIdx}
+                                                        className={`px-4 py-3 text-sm text-gray-700 whitespace-nowrap border-r border-gray-100 last:border-r-0 ${
+                                                          rIdx === 0 ? 'font-semibold text-gray-900' : ''
+                                                        }`}
+                                                      >
+                                                        {cell}
+                                                      </td>
+                                                    ))}
+                                                  </tr>
+                                                ))}
+                                              </tbody>
+                                            </table>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* 블록 상세 보기 */}
+                            <details className='group'>
+                              <summary className='text-sm font-medium text-gray-700 cursor-pointer mb-2 list-none flex items-center'>
+                                <span>Detected blocks ({extractResult.data.blocks.length}) - view details</span>
+                                <span className='ml-2 transition group-open:rotate-180 text-gray-400'>▼</span>
+                              </summary>
+
+                              <div className='border border-gray-200 rounded-lg overflow-hidden mt-2'>
+                                <div className='max-h-60 overflow-y-auto divide-y divide-gray-100'>
+                                  {extractResult.data.blocks.map((block, index) => (
+                                    <div
+                                      key={index}
+                                      className='p-3 hover:bg-gray-50 transition-colors flex justify-between items-start'
+                                    >
+                                      <p className='text-sm text-gray-900 flex-1 mr-4'>{block.text}</p>
+                                      <div className='flex flex-col items-end'>
+                                        <span className='text-xs bg-gray-100 px-2 py-0.5 rounded text-gray-600 font-medium'>
+                                          {block.blockType}
+                                        </span>
+                                        <span
+                                          className={`text-xs mt-1 ${
+                                            block.confidence > 90
+                                              ? 'text-green-600'
+                                              : block.confidence > 70
+                                                ? 'text-yellow-600'
+                                                : 'text-red-600'
+                                          }`}
+                                        >
+                                          {block.confidence.toFixed(1)}%
+                                        </span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </details>
+                          </>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               )}
             </div>

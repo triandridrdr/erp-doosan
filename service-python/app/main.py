@@ -5635,6 +5635,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     engine = payload.get("engine") or "tesseract"
     preprocess = bool(payload.get("preprocess", True))
     preprocess_mode = payload.get("preprocess_mode") or "basic"
+    view = str(payload.get("view") or "").strip().lower()
     file_b64 = payload.get("file_b64")
 
     if not isinstance(file_b64, str) or not file_b64:
@@ -6383,6 +6384,25 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             "errors": len(errors),
         },
     )
+    sales_order_payload = _build_sales_order_payload(combined_tables)
+
+    # View mode: return only the minimal JSON payload (hide full text/pages/tables for production use)
+    if view in {"json", "payload", "minimal", "view_json"}:
+        return {
+            "schema_version": "1.0",
+            "document_meta": {
+                "request_id": request_id,
+                "filename": filename,
+                "engine": engine,
+                "preprocess": {"enabled": preprocess, "mode": preprocess_mode},
+                "page_count": len(all_pages),
+                "timings": {"total_sec": round(dt, 4)},
+            },
+            "warnings": warnings,
+            "errors": errors,
+            "sales_order_payload": sales_order_payload,
+        }
+
     return {
         "schema_version": "1.0",
         "document_meta": {
@@ -6402,6 +6422,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         "tables": combined_tables,
         "fields": combined_fields,
         "field_pairs": combined_field_pairs,
+        "sales_order_payload": sales_order_payload,
     }
 
 
@@ -6412,6 +6433,7 @@ async def ocr_extract_async(
     engine: _ENGINE = Query("tesseract"),
     preprocess: bool = Query(True),
     preprocess_mode: _PREPROCESS_MODE = Query("basic"),
+    view: str = Query("json"),
 ) -> JSONResponse:
     if ocr_extract_task is None:
         raise HTTPException(status_code=503, detail="Celery not available")
@@ -6431,6 +6453,7 @@ async def ocr_extract_async(
         "engine": engine,
         "preprocess": preprocess,
         "preprocess_mode": preprocess_mode,
+        "view": view,
         "file_b64": base64.b64encode(file_bytes).decode("utf-8"),
     }
 
@@ -6459,6 +6482,7 @@ async def ocr_extract(
     engine: _ENGINE = Query("tesseract"),
     preprocess: bool = Query(True),
     preprocess_mode: _PREPROCESS_MODE = Query("basic"),
+    view: str = Query("json"),
 ) -> JSONResponse:
     t0 = time.perf_counter()
     request_id = request.headers.get("x-request-id") or request.headers.get("x-correlation-id") or str(uuid.uuid4())
@@ -7353,6 +7377,25 @@ async def ocr_extract(
                 pass
     except Exception:
         pass
+
+    view0 = str(view or "").strip().lower()
+    if view0 in {"json", "payload", "minimal", "view_json"}:
+        return JSONResponse(
+            {
+                "schema_version": "1.0",
+                "document_meta": {
+                    "request_id": request_id,
+                    "filename": filename,
+                    "engine": engine,
+                    "preprocess": {"enabled": preprocess, "mode": preprocess_mode},
+                    "page_count": len(all_pages),
+                    "timings": {"total_sec": round(dt, 4)},
+                },
+                "warnings": warnings,
+                "errors": errors,
+                "sales_order_payload": sales_order_payload,
+            }
+        )
 
     return JSONResponse(
         {
