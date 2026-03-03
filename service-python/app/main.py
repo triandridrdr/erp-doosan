@@ -5433,6 +5433,20 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         pdf_tables_pages = _pdf_tables_pages_tabula(file_bytes, page_count) if page_count else None
         has_pdf_tables = any((isinstance(p, list) and len(p) > 0) for p in (pdf_tables_pages or []))
 
+        force_ocr_for_partial = False
+        try:
+            if (not has_pdf_tables) and joined and re.search(r"\bPARTIAL\s+DELIVERIES\b", joined, flags=re.IGNORECASE):
+                force_ocr_for_partial = True
+        except Exception:
+            force_ocr_for_partial = False
+
+        force_ocr_for_partial = False
+        try:
+            if (not has_pdf_tables) and joined and re.search(r"\bPARTIAL\s+DELIVERIES\b", joined, flags=re.IGNORECASE):
+                force_ocr_for_partial = True
+        except Exception:
+            force_ocr_for_partial = False
+
         if so_dbg_tables:
             try:
                 per_page_counts = [len(p or []) if isinstance(p, list) else 0 for p in (pdf_tables_pages or [])]
@@ -5473,7 +5487,8 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         # Digital-PDF fast path:
         # - If embedded text exists, we can extract header fields from text.
         # - If Tabula can extract tables, we can also parse TOTAL ORDER / partial deliveries without OCR.
-        if ((joined and len(joined) >= 50) or has_pdf_tables):
+        # - If Tabula failed and the PDF contains PARTIAL DELIVERIES, force OCR fallback to capture tables.
+        if (not force_ocr_for_partial) and (((joined and len(joined) >= 50) or has_pdf_tables)):
             t_pdf = time.perf_counter()
             all_pages: List[Dict[str, Any]] = []
             combined_texts: List[str] = []
@@ -5713,6 +5728,22 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "field_pairs": combined_field_pairs,
                 "sales_order_payload": _build_sales_order_payload(combined_tables),
             }
+
+        if force_ocr_for_partial and so_dbg_tables:
+            try:
+                logger.info(
+                    "so_pdf_fastpath_force_ocr_partial_deliveries %s",
+                    json.dumps(
+                        {
+                            "event": "so_pdf_fastpath_force_ocr_partial_deliveries",
+                            "request_id": request_id,
+                            "note": "Tabula returned no tables but PARTIAL DELIVERIES found in embedded text; using OCR fallback",
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            except Exception:
+                pass
 
     images_bgr = _images_from_upload(filename, file_bytes)
 
@@ -6268,9 +6299,18 @@ async def ocr_extract(
         pdf_tables_pages = _pdf_tables_pages_tabula(file_bytes, page_count) if page_count else None
         has_pdf_tables = any((isinstance(p, list) and len(p) > 0) for p in (pdf_tables_pages or []))
 
+        force_ocr_for_partial = False
+        try:
+            if (not has_pdf_tables) and joined and re.search(r"\bPARTIAL\s+DELIVERIES\b", joined, flags=re.IGNORECASE):
+                force_ocr_for_partial = True
+        except Exception:
+            force_ocr_for_partial = False
+
         # Digital-PDF fast path (pdfplumber text + Tabula tables) for any engine.
         # Fall back to OCR if there is no usable embedded text and no tables.
-        if ((joined and len(joined) >= 50) or has_pdf_tables):
+        # Additionally, if Tabula produced no tables and the embedded text contains PARTIAL DELIVERIES,
+        # force OCR to capture the partial delivery grids.
+        if (not force_ocr_for_partial) and (((joined and len(joined) >= 50) or has_pdf_tables)):
             all_pages: List[Dict[str, Any]] = []
             combined_texts: List[str] = []
             for i, t in enumerate(pages_text or [], start=1):
@@ -6463,7 +6503,6 @@ async def ocr_extract(
                 except Exception:
                     pass
 
-            dt = time.perf_counter() - t0
             logger.info(
                 "ocr_extract_done",
                 extra={
@@ -6500,6 +6539,22 @@ async def ocr_extract(
                     "sales_order_payload": _build_sales_order_payload(combined_tables),
                 }
             )
+
+        if force_ocr_for_partial and so_dbg_tables:
+            try:
+                logger.info(
+                    "so_pdf_fastpath_force_ocr_partial_deliveries %s",
+                    json.dumps(
+                        {
+                            "event": "so_pdf_fastpath_force_ocr_partial_deliveries",
+                            "request_id": request_id,
+                            "note": "Tabula returned no tables but PARTIAL DELIVERIES found in embedded text; using OCR fallback",
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            except Exception:
+                pass
 
     try:
         images_bgr = _images_from_upload(filename, file_bytes)
