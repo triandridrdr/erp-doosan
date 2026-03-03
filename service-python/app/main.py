@@ -2674,24 +2674,84 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
         "order_nr": "ordernr",
         "orderno": "ordernr",
         "order": "ordernr",
+        "orderid": "ordernr",
+        "ordernumber": "ordernr",
+        "no": "ordernr",
+        "noso": "ordernr",
+        "nosalesorder": "ordernr",
+        "salesorder": "ordernr",
+        "salesorderno": "ordernr",
+        "salesordernumber": "ordernr",
+        "pono": "ordernr",
+        "ponumber": "ordernr",
+        "purchaseorderno": "ordernr",
+        "purchaseordernumber": "ordernr",
+        "po": "ordernr",
+        "so": "ordernr",
         "date": "date",
         "orderdate": "date",
         "dateoforder": "date",
+        "issuedate": "date",
+        "issue_date": "date",
+        "documentdate": "date",
+        "docdate": "date",
         "season": "season",
+        "seasoncode": "season",
+        "seasonname": "season",
         "buyer": "buyer",
+        "customer": "buyer",
+        "cust": "buyer",
+        "soldto": "buyer",
+        "sold_to": "buyer",
+        "billto": "buyer",
+        "bill_to": "buyer",
         "purchaser": "purchaser",
+        "purchace": "purchaser",
+        "purchasername": "purchaser",
+        "purchasing": "purchaser",
+        "purchase": "purchaser",
         "supplier": "supplier",
+        "vendor": "supplier",
+        "seller": "supplier",
+        "factory": "supplier",
         "sendto": "sendto",
         "send_to": "sendto",
+        "send": "sendto",
+        "shipto": "sendto",
+        "ship_to": "sendto",
+        "shiptoaddress": "sendto",
+        "shippingaddress": "sendto",
+        "deliveryaddress": "sendto",
+        "deliver_to": "sendto",
+        "deliverto": "sendto",
         "paymentterms": "paymentterms",
         "payment_terms": "paymentterms",
         "termsofpayment": "paymentterms",
+        "terms": "paymentterms",
+        "paymentterm": "paymentterms",
+        "payment_term": "paymentterms",
+        "payterms": "paymentterms",
         "supplierref": "supplierref",
         "supplier_ref": "supplierref",
+        "vendorref": "supplierref",
+        "vendor_ref": "supplierref",
+        "reference": "supplierref",
+        "ref": "supplierref",
         "article": "article",
+        "style": "article",
+        "styleno": "article",
+        "style_no": "article",
+        "item": "article",
+        "itemno": "article",
+        "item_no": "article",
         "description": "description",
+        "desc": "description",
+        "descripton": "description",
+        "descriplion": "description",
         "marketoforigin": "marketoforigin",
         "market_origin": "marketoforigin",
+        "origin": "marketoforigin",
+        "countryoforigin": "marketoforigin",
         "pvp": "pvp",
         "compositionsinformation": "compositionsinformation",
         "compositioninformation": "compositionsinformation",
@@ -2728,6 +2788,58 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
         if best_key and best_d <= 2:
             return _HEADER_LABEL_TO_CANON.get(best_key, "")
         return ""
+
+    def _looks_like_care_noise(s: str) -> bool:
+        try:
+            ss = str(s or "")
+            if not ss.strip():
+                return False
+            label_hits = 0
+            for tok in [
+                "HANGTAG",
+                "MAIN LABEL",
+                "EXTERNAL FABRIC",
+                "HANGING",
+                "TOTAL ORDER",
+                "COMPOSITION",
+            ]:
+                if re.search(r"\b" + re.escape(tok) + r"\b", ss, flags=re.IGNORECASE):
+                    label_hits += 1
+            has_care_verbs = re.search(r"\b(WASH|BLEACH|IRON|DRY|TUMBLE|DRY\s*CLEAN)\b", ss, flags=re.IGNORECASE) is not None
+            has_pipes = ss.count("|") >= 2
+            has_temp = re.search(r"\b\d{1,3}\s*(?:°\s*)?(?:C|F)\b", ss, flags=re.IGNORECASE) is not None
+            return (label_hits >= 2 and (not (has_care_verbs or has_pipes or has_temp))) or (label_hits >= 3 and not has_care_verbs)
+        except Exception:
+            return False
+
+    def _looks_like_care_value(s: str) -> bool:
+        try:
+            ss = str(s or "")
+            if not ss.strip():
+                return False
+            if re.search(r"\b(WASH|BLEACH|IRON|DRY|TUMBLE|DRY\s*CLEAN|DO\s*NOT)\b", ss, flags=re.IGNORECASE):
+                return True
+            if ss.count("|") >= 2:
+                return True
+            if re.search(r"\b\d{1,3}\s*(?:°\s*)?(?:C|F)\b", ss, flags=re.IGNORECASE) is not None:
+                return True
+            return False
+        except Exception:
+            return False
+
+    def _maybe_set_header(ck: str, v: str) -> None:
+        if not ck:
+            return
+        if ck not in _HEADER_CANON_KEYS:
+            return
+        vv = str(v or "").strip()
+        if ck == "careinstructions":
+            existing = str(payload["header"].get("careinstructions") or "").strip()
+            if existing and _looks_like_care_value(existing):
+                return
+            if _looks_like_care_noise(vv):
+                return
+        payload["header"][ck] = vv
 
     def _infer_colour_from_row(row: Dict[str, Any]) -> str:
         try:
@@ -2783,7 +2895,7 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                     if k:
                         ck = _canon_header_key_fuzzy(k) or _norm_key(k)
                         if ck:
-                            payload["header"][ck] = v
+                            _maybe_set_header(ck, v)
             else:
                 # fallback to rows_matrix
                 rm = ai_tbl.get("rows_matrix")
@@ -2796,7 +2908,54 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                         if k and k.lower() != "key":
                             ck = _canon_header_key_fuzzy(k) or _norm_key(k)
                             if ck:
-                                payload["header"][ck] = v
+                                _maybe_set_header(ck, v)
+    except Exception:
+        pass
+
+    # 1b) Fallback: extract header-like key/value pairs from any table rows_matrix
+    try:
+        def _row_blob(row: Any) -> str:
+            if not isinstance(row, list):
+                return ""
+            return " ".join([str(x or "").strip() for x in row if str(x or "").strip()]).strip()
+
+        for t in tables:
+            if not isinstance(t, dict):
+                continue
+            rm = t.get("rows_matrix")
+            if not isinstance(rm, list) or not rm:
+                continue
+
+            rows = [r for r in rm if isinstance(r, list) and any(str(x or "").strip() for x in r)]
+            if not rows:
+                continue
+
+            for r in rows:
+                if len(r) < 2:
+                    continue
+                k0 = str(r[0] or "").strip()
+                v0 = str(r[1] or "").strip()
+                if not k0 or not v0:
+                    continue
+                ck0 = _canon_header_key_fuzzy(k0) or ""
+                if ck0:
+                    _maybe_set_header(ck0, v0)
+
+            for i, r in enumerate(rows):
+                blob = _row_blob(r)
+                if not blob:
+                    continue
+                ck = _canon_header_key_fuzzy(blob) or ""
+                if not ck:
+                    continue
+                if i + 1 >= len(rows):
+                    continue
+                nxt = _row_blob(rows[i + 1])
+                if not nxt:
+                    continue
+                if _canon_header_key_fuzzy(nxt):
+                    continue
+                _maybe_set_header(ck, nxt)
     except Exception:
         pass
 
@@ -5433,20 +5592,6 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         pdf_tables_pages = _pdf_tables_pages_tabula(file_bytes, page_count) if page_count else None
         has_pdf_tables = any((isinstance(p, list) and len(p) > 0) for p in (pdf_tables_pages or []))
 
-        force_ocr_for_partial = False
-        try:
-            if (not has_pdf_tables) and joined and re.search(r"\bPARTIAL\s+DELIVERIES\b", joined, flags=re.IGNORECASE):
-                force_ocr_for_partial = True
-        except Exception:
-            force_ocr_for_partial = False
-
-        force_ocr_for_partial = False
-        try:
-            if (not has_pdf_tables) and joined and re.search(r"\bPARTIAL\s+DELIVERIES\b", joined, flags=re.IGNORECASE):
-                force_ocr_for_partial = True
-        except Exception:
-            force_ocr_for_partial = False
-
         if so_dbg_tables:
             try:
                 per_page_counts = [len(p or []) if isinstance(p, list) else 0 for p in (pdf_tables_pages or [])]
@@ -5487,8 +5632,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         # Digital-PDF fast path:
         # - If embedded text exists, we can extract header fields from text.
         # - If Tabula can extract tables, we can also parse TOTAL ORDER / partial deliveries without OCR.
-        # - If Tabula failed and the PDF contains PARTIAL DELIVERIES, force OCR fallback to capture tables.
-        if (not force_ocr_for_partial) and (((joined and len(joined) >= 50) or has_pdf_tables)):
+        if ((joined and len(joined) >= 50) or has_pdf_tables):
             t_pdf = time.perf_counter()
             all_pages: List[Dict[str, Any]] = []
             combined_texts: List[str] = []
@@ -5728,22 +5872,6 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "field_pairs": combined_field_pairs,
                 "sales_order_payload": _build_sales_order_payload(combined_tables),
             }
-
-        if force_ocr_for_partial and so_dbg_tables:
-            try:
-                logger.info(
-                    "so_pdf_fastpath_force_ocr_partial_deliveries %s",
-                    json.dumps(
-                        {
-                            "event": "so_pdf_fastpath_force_ocr_partial_deliveries",
-                            "request_id": request_id,
-                            "note": "Tabula returned no tables but PARTIAL DELIVERIES found in embedded text; using OCR fallback",
-                        },
-                        ensure_ascii=False,
-                    ),
-                )
-            except Exception:
-                pass
 
     images_bgr = _images_from_upload(filename, file_bytes)
 
@@ -6299,18 +6427,9 @@ async def ocr_extract(
         pdf_tables_pages = _pdf_tables_pages_tabula(file_bytes, page_count) if page_count else None
         has_pdf_tables = any((isinstance(p, list) and len(p) > 0) for p in (pdf_tables_pages or []))
 
-        force_ocr_for_partial = False
-        try:
-            if (not has_pdf_tables) and joined and re.search(r"\bPARTIAL\s+DELIVERIES\b", joined, flags=re.IGNORECASE):
-                force_ocr_for_partial = True
-        except Exception:
-            force_ocr_for_partial = False
-
         # Digital-PDF fast path (pdfplumber text + Tabula tables) for any engine.
         # Fall back to OCR if there is no usable embedded text and no tables.
-        # Additionally, if Tabula produced no tables and the embedded text contains PARTIAL DELIVERIES,
-        # force OCR to capture the partial delivery grids.
-        if (not force_ocr_for_partial) and (((joined and len(joined) >= 50) or has_pdf_tables)):
+        if ((joined and len(joined) >= 50) or has_pdf_tables):
             all_pages: List[Dict[str, Any]] = []
             combined_texts: List[str] = []
             for i, t in enumerate(pages_text or [], start=1):
@@ -6503,6 +6622,7 @@ async def ocr_extract(
                 except Exception:
                     pass
 
+            dt = time.perf_counter() - t0
             logger.info(
                 "ocr_extract_done",
                 extra={
@@ -6539,22 +6659,6 @@ async def ocr_extract(
                     "sales_order_payload": _build_sales_order_payload(combined_tables),
                 }
             )
-
-        if force_ocr_for_partial and so_dbg_tables:
-            try:
-                logger.info(
-                    "so_pdf_fastpath_force_ocr_partial_deliveries %s",
-                    json.dumps(
-                        {
-                            "event": "so_pdf_fastpath_force_ocr_partial_deliveries",
-                            "request_id": request_id,
-                            "note": "Tabula returned no tables but PARTIAL DELIVERIES found in embedded text; using OCR fallback",
-                        },
-                        ensure_ascii=False,
-                    ),
-                )
-            except Exception:
-                pass
 
     try:
         images_bgr = _images_from_upload(filename, file_bytes)
