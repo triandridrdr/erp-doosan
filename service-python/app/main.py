@@ -2811,10 +2811,41 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
             if isinstance(rows, list):
                 grid_out: List[Dict[str, Any]] = []
                 unit_lot: Optional[str] = None
+
+                def _get_ci(d: Dict[str, Any], key: str) -> Any:
+                    try:
+                        if key in d:
+                            return d.get(key)
+                        lk = str(key or "").strip().lower()
+                        if not lk:
+                            return None
+                        for kk, vv in d.items():
+                            if str(kk or "").strip().lower() == lk:
+                                return vv
+                    except Exception:
+                        return None
+                    return None
+
+                def _get_any_ci(d: Dict[str, Any], keys: List[str]) -> Any:
+                    for k in keys:
+                        v = _get_ci(d, k)
+                        if v is not None and str(v).strip() != "":
+                            return v
+                    return None
+
                 for r in rows:
                     if not isinstance(r, dict):
                         continue
-                    colour = str(r.get("COLOUR") or "").strip()
+                    colour = str(_get_any_ci(r, ["COLOUR", "colour"]) or "").strip()
+
+                    # UNIT LOT row should be handled before any colour inference/override
+                    if re.search(r"\bUNIT\s*LOT\b", colour or "", flags=re.IGNORECASE):
+                        for k in ["XS", "S", "M", "L", "XL", "Total"]:
+                            v = str(_get_any_ci(r, [k, k.lower()]) or "").strip()
+                            if v:
+                                unit_lot = v
+                                break
+                        continue
 
                     # Override if empty or looks like noise and not already a valid colour/TOTAL
                     if (
@@ -2828,20 +2859,19 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                         if inferred:
                             colour = inferred
                     if re.search(r"\bUNIT\s*LOT\b", colour, flags=re.IGNORECASE):
-                        # value usually placed into XS or first numeric col
                         for k in ["XS", "S", "M", "L", "XL", "Total"]:
-                            v = str(r.get(k) or "").strip()
+                            v = str(_get_any_ci(r, [k, k.lower()]) or "").strip()
                             if v:
                                 unit_lot = v
                                 break
                         continue
 
-                    xs_v = str(r.get("XS") or "").strip()
-                    s_v = str(r.get("S") or "").strip()
-                    m_v = str(r.get("M") or "").strip()
-                    l_v = str(r.get("L") or "").strip()
-                    xl_v = str(r.get("XL") or "").strip()
-                    tot_v = str(r.get("Total") or r.get("TOTAL") or "").strip()
+                    xs_v = str(_get_any_ci(r, ["XS", "xs"]) or "").strip()
+                    s_v = str(_get_any_ci(r, ["S", "s"]) or "").strip()
+                    m_v = str(_get_any_ci(r, ["M", "m"]) or "").strip()
+                    l_v = str(_get_any_ci(r, ["L", "l"]) or "").strip()
+                    xl_v = str(_get_any_ci(r, ["XL", "xl"]) or "").strip()
+                    tot_v = str(_get_any_ci(r, ["Total", "TOTAL", "total"]) or "").strip()
 
                     # Drop noise rows (commonly from UNIT LOT value splitting into COLOUR column)
                     if re.fullmatch(r"\d{1,6}", colour or "") and not any([xs_v, s_v, m_v, l_v, xl_v, tot_v]):
@@ -5583,17 +5613,16 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if not (isinstance(grid0, list) and len(grid0) > 0):
                     parsed = _parse_total_order_from_text("\n".join(combined_texts))
                     if isinstance(parsed, dict):
-                        unit_lot = parsed.pop("unit_lot", None)
-                        combined_tables.append(parsed)
+                        unit_lot = parsed.get("unit_lot") if isinstance(parsed.get("unit_lot"), str) else None
                         if unit_lot is not None:
-                            combined_tables.append(
-                                {
-                                    "page": 1,
-                                    "headers": ["COLOUR", "XS"],
-                                    "rows": [{"COLOUR": "UNIT LOT", "XS": str(unit_lot)}],
-                                    "table_kind": "total_order_grid",
-                                }
-                            )
+                            try:
+                                rows_p = parsed.get("rows")
+                                if isinstance(rows_p, list):
+                                    rows_p.append({"COLOUR": "UNIT LOT", "XS": str(unit_lot)})
+                                    parsed["rows"] = rows_p
+                            except Exception:
+                                pass
+                        combined_tables.append(parsed)
                         combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
                         try:
                             for t in combined_tables:
@@ -6359,17 +6388,16 @@ async def ocr_extract(
                 if not (isinstance(grid0, list) and len(grid0) > 0):
                     parsed = _parse_total_order_from_text("\n".join(combined_texts))
                     if isinstance(parsed, dict):
-                        unit_lot = parsed.pop("unit_lot", None)
-                        combined_tables.append(parsed)
+                        unit_lot = parsed.get("unit_lot") if isinstance(parsed.get("unit_lot"), str) else None
                         if unit_lot is not None:
-                            combined_tables.append(
-                                {
-                                    "page": 1,
-                                    "headers": ["COLOUR", "XS"],
-                                    "rows": [{"COLOUR": "UNIT LOT", "XS": str(unit_lot)}],
-                                    "table_kind": "total_order_grid",
-                                }
-                            )
+                            try:
+                                rows_p = parsed.get("rows")
+                                if isinstance(rows_p, list):
+                                    rows_p.append({"COLOUR": "UNIT LOT", "XS": str(unit_lot)})
+                                    parsed["rows"] = rows_p
+                            except Exception:
+                                pass
+                        combined_tables.append(parsed)
                         combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
                         try:
                             for t in combined_tables:
