@@ -2919,6 +2919,21 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                 return ""
             return " ".join([str(x or "").strip() for x in row if str(x or "").strip()]).strip()
 
+        def _cell_str(x: Any) -> str:
+            return str(x or "").strip()
+
+        def _is_probably_header_row(row: List[Any]) -> bool:
+            try:
+                # Header rows are usually short-ish and mostly text.
+                nonempty = [c for c in [_cell_str(x) for x in row] if c]
+                if len(nonempty) < 2:
+                    return False
+                digit_cells = sum(1 for c in nonempty if re.search(r"\d", c) is not None)
+                # Allow some digits (e.g., buyer code), but not mostly numeric.
+                return digit_cells <= max(1, int(len(nonempty) * 0.5))
+            except Exception:
+                return False
+
         for t in tables:
             if not isinstance(t, dict):
                 continue
@@ -2956,6 +2971,60 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                 if _canon_header_key_fuzzy(nxt):
                     continue
                 _maybe_set_header(ck, nxt)
+
+            # Horizontal header/value tables:
+            # Example:
+            #   ["ORDER NR", "DATE", "SUPPLIER"]
+            #   ["55876-D", "23/07/2025", "D&J ..."]
+            try:
+                for i, r in enumerate(rows[:-1]):
+                    if not isinstance(r, list) or len(r) < 2:
+                        continue
+                    if not _is_probably_header_row(r):
+                        continue
+
+                    # Build column index -> canon key map
+                    col_map: Dict[int, str] = {}
+                    for ci, cell in enumerate(r):
+                        s = _cell_str(cell)
+                        if not s:
+                            continue
+                        ck = _canon_header_key_fuzzy(s) or ""
+                        if ck:
+                            col_map[int(ci)] = ck
+
+                    # Need at least 2 recognized header keys to be confident
+                    uniq = set(col_map.values())
+                    if len(uniq) < 2:
+                        continue
+
+                    vrow = rows[i + 1]
+                    if not isinstance(vrow, list) or not any(_cell_str(x) for x in vrow):
+                        continue
+                    # Avoid pairing header->value if the next row also looks like headers
+                    header_like_next = 0
+                    for ci, ck in col_map.items():
+                        if ci < len(vrow) and _canon_header_key_fuzzy(_cell_str(vrow[ci]) or ""):
+                            header_like_next += 1
+                    if header_like_next >= 2:
+                        continue
+
+                    for ci, ck in col_map.items():
+                        if ci >= len(vrow):
+                            continue
+                        vv = _cell_str(vrow[ci])
+                        if not vv:
+                            continue
+                        # Don't overwrite good existing values.
+                        existing = str(payload["header"].get(ck) or "").strip()
+                        if existing:
+                            if ck == "careinstructions" and _looks_like_care_value(existing):
+                                continue
+                            if len(existing) >= len(vv):
+                                continue
+                        _maybe_set_header(ck, vv)
+            except Exception:
+                pass
     except Exception:
         pass
 
