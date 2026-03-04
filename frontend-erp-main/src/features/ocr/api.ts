@@ -41,6 +41,13 @@ export const ocrApi = {
   },
 };
 
+export const ocrDraftApi = {
+  save: async (req: { sourceFilename?: string; soNumber?: string; draft: unknown }) => {
+    const response = await client.post('/api/v1/ocr/drafts', req);
+    return response.data;
+  },
+};
+
 export const ocrPythonApi = {
   extract: async (file: File) => {
     const formData = new FormData();

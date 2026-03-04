@@ -2,6 +2,8 @@ package com.doosan.erp;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.autoconfigure.domain.EntityScan;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 
 /**
  * ERP API 템플릿 애플리케이션의 메인 클래스
@@ -12,7 +14,9 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * - EnableAutoConfiguration: 자동 설정 활성화
  * - ComponentScan: 하위 패키지 컴포넌트 자동 스캔
  */
-@SpringBootApplication
+@SpringBootApplication(scanBasePackages = "com.doosan.erp")
+@EntityScan(basePackages = "com.doosan.erp")
+@EnableJpaRepositories(basePackages = "com.doosan.erp")
 public class ErpApiTemplateApplication {
 
     /**

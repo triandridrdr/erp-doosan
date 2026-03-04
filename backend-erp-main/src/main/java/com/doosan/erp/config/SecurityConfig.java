@@ -40,6 +40,7 @@ public class SecurityConfig {
     // 인증 없이 접근 가능한 URL 패턴 목록
     private static final String[] PUBLIC_URLS = {
             "/api/auth/**", // 인증 API (로그인, 회원가입)
+            "/api/v1/ocr/drafts/**",
             "/api/docs/**",
             "/api/swagger-ui/**",
             "/api-docs/**",

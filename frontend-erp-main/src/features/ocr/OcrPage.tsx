@@ -8,7 +8,7 @@ import { AlertCircle, FileText, Loader2, Table as TableIcon, Type, Upload } from
 import { useEffect, useMemo, useState } from 'react';
 
 import { Button } from '../../components/ui/Button';
-import { ocrPythonApi } from './api';
+import { ocrDraftApi, ocrPythonApi } from './api';
 import type {
   DocumentAnalysisResponse,
   DocumentAnalysisResponseData,
@@ -324,6 +324,64 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
   };
 };
 
+const buildDraftPayloadForSave = (draft: ErpDraft) => {
+  const headerMap = new Map(draft.headerRows.map((r) => [r.field, r.value] as const));
+  const soNumber = headerMap.get('SO Number') || '';
+  const dateIso = headerMap.get('Date (ISO)') || '';
+  const season = headerMap.get('Season') || '';
+  const buyerCode = headerMap.get('Buyer Code') || '';
+  const supplier = headerMap.get('Supplier') || '';
+  const article = headerMap.get('Article') || '';
+  const paymentTerms = headerMap.get('Payment Terms') || '';
+  const countryOfOrigin = headerMap.get('Country of Origin') || '';
+  const totalQty = toIntLoose(headerMap.get('Total Qty') || '');
+
+  const salesOrderDraft = {
+    status: draft.system.status,
+    so_number: soNumber,
+    date_iso: dateIso,
+    season,
+    buyer_code: buyerCode,
+    supplier,
+    article,
+    payment_terms: paymentTerms,
+    country_of_origin: countryOfOrigin,
+    total_qty: totalQty,
+  };
+
+  const salesOrderLines = draft.sizeRows.map((r) => ({
+    color: r.color,
+    xs: r.xs,
+    s: r.s,
+    m: r.m,
+    l: r.l,
+    xl: r.xl,
+    total: r.total,
+  }));
+
+  const bomDraft = draft.bomRows.map((r) => ({
+    status: draft.system.status,
+    article,
+    season,
+    component: r.component,
+    category: r.category,
+    composition: r.composition,
+    uom: r.uom,
+    consumption_per_unit: r.consumptionPerUnit ? r.consumptionPerUnit : null,
+    waste_percent: r.wastePercent ? r.wastePercent : null,
+  }));
+
+  return {
+    system: draft.system,
+    headerRows: draft.headerRows,
+    sizeRows: draft.sizeRows,
+    bomRows: draft.bomRows,
+    salesOrderDraft,
+    salesOrderLines,
+    bomDraft,
+  };
+};
+
 // OCR 모드 정의: 단순 추출(extract) vs 문서 분석(analyze)
 type OcrMode = 'extract' | 'analyze';
 
@@ -341,6 +399,9 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null); // 업로드된 파일
   const [previewUrl, setPreviewUrl] = useState<string | null>(null); // 이미지 미리보기 URL
   const [erpDraft, setErpDraft] = useState<ErpDraft | null>(null);
+  const [saveStatus, setSaveStatus] = useState<{ state: 'idle' | 'saving' | 'saved' | 'error'; id?: number; message?: string }>({
+    state: 'idle',
+  });
 
   // 텍스트 추출 Mutation
   const {
@@ -365,6 +426,22 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   });
 
   const isPending = isExtractPending || isAnalyzePending;
+
+  const { mutate: saveDraft, isPending: isSavePending } = useMutation({
+    mutationFn: ocrDraftApi.save,
+    onMutate: () => {
+      setSaveStatus({ state: 'saving' });
+    },
+    onSuccess: (res: any) => {
+      const id = res?.data?.id;
+      if (typeof id === 'number') setSaveStatus({ state: 'saved', id });
+      else setSaveStatus({ state: 'saved' });
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message || err?.message || 'Save failed';
+      setSaveStatus({ state: 'error', message: String(msg) });
+    },
+  });
 
   const salesOrderPayload = useMemo(() => {
     const p = extractResult?.data?.salesOrderPayload;
@@ -406,6 +483,7 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   // 처리 시작 핸들러
   const handleProcess = () => {
     if (selectedFile) {
+      setSaveStatus({ state: 'idle' });
       if (mode === 'extract') {
         extractText(selectedFile);
       } else {
@@ -707,7 +785,38 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                           <div className='space-y-8'>
                             <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
                               <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
-                                <h3 className='font-semibold text-gray-900'>SECTION 1 – SALES ORDER HEADER (DRAFT)</h3>
+                                <div className='flex items-center justify-between gap-4'>
+                                  <h3 className='font-semibold text-gray-900'>SECTION 1 – SALES ORDER HEADER (DRAFT)</h3>
+                                  <div className='flex items-center gap-3'>
+                                    {saveStatus.state === 'saved' && (
+                                      <span className='text-xs text-green-700 bg-green-50 border border-green-200 px-2 py-1 rounded'>
+                                        Saved{typeof saveStatus.id === 'number' ? ` (id=${saveStatus.id})` : ''}
+                                      </span>
+                                    )}
+                                    {saveStatus.state === 'error' && (
+                                      <span className='text-xs text-red-700 bg-red-50 border border-red-200 px-2 py-1 rounded'>
+                                        {saveStatus.message || 'Save failed'}
+                                      </span>
+                                    )}
+                                    <Button
+                                      className='h-9 px-3 text-sm'
+                                      disabled={isSavePending || saveStatus.state === 'saving'}
+                                      onClick={() => {
+                                        if (!erpDraft) return;
+                                        const headerMap = new Map(erpDraft.headerRows.map((r) => [r.field, r.value] as const));
+                                        const soNumber = headerMap.get('SO Number') || '';
+                                        const payload = buildDraftPayloadForSave(erpDraft);
+                                        saveDraft({
+                                          sourceFilename: selectedFile?.name,
+                                          soNumber,
+                                          draft: payload,
+                                        });
+                                      }}
+                                    >
+                                      {saveStatus.state === 'saving' ? 'Saving...' : 'Save Draft'}
+                                    </Button>
+                                  </div>
+                                </div>
                               </div>
                               <div className='p-4 overflow-x-auto'>
                                 <table className='min-w-full divide-y divide-gray-200'>
