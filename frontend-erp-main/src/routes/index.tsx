@@ -13,6 +13,8 @@ import { SignupPage } from '../features/auth/SignupPage';
 import { StockListPage } from '../features/inventory/StockListPage';
 import { OcrPage } from '../features/ocr/OcrPage';
 import { OcrPythonPage } from '../features/ocr/OcrPythonPage';
+import { OcrSalesOrderDetailPage } from '../features/ocr/OcrSalesOrderDetailPage';
+import { OcrSalesOrdersPage } from '../features/ocr/OcrSalesOrdersPage';
 import { SalesOrderListPage } from '../features/sales/SalesOrderListPage';
 
 /**
@@ -150,6 +152,8 @@ const router = createBrowserRouter([
       { path: 'accounting', element: <JournalEntryListPage /> }, // 회계 관리
       { path: 'ocr', element: <OcrPage /> }, // OCR 기능
       { path: 'ocr-python', element: <OcrPythonPage /> }, // OCR with Python
+      { path: 'ocr-sales-orders', element: <OcrSalesOrdersPage /> },
+      { path: 'ocr-sales-orders/:id', element: <OcrSalesOrderDetailPage /> },
     ],
   },
   {

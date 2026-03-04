@@ -46,6 +46,31 @@ export const ocrDraftApi = {
     const response = await client.post('/api/v1/ocr/drafts', req);
     return response.data;
   },
+
+  list: async () => {
+    const response = await client.get('/api/v1/ocr/drafts');
+    return response.data;
+  },
+
+  get: async (id: number) => {
+    const response = await client.get(`/api/v1/ocr/drafts/${id}`);
+    return response.data;
+  },
+
+  update: async (id: number, req: { sourceFilename?: string; soNumber?: string; draft: unknown }) => {
+    const response = await client.put(`/api/v1/ocr/drafts/${id}`, req);
+    return response.data;
+  },
+
+  approve: async (id: number) => {
+    const response = await client.post(`/api/v1/ocr/drafts/${id}/approve`);
+    return response.data;
+  },
+
+  delete: async (id: number) => {
+    const response = await client.delete(`/api/v1/ocr/drafts/${id}`);
+    return response.data;
+  },
 };
 
 export const ocrPythonApi = {

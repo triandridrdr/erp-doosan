@@ -17,6 +17,7 @@ const navigation = [
   { name: 'Accounting', href: '/accounting', icon: FileText },
   { name: 'OCR Extraction', href: '/ocr', icon: ScanLine },
   { name: 'OCR with Python', href: '/ocr-python', icon: ScanLine },
+  { name: 'Sales Order from OCR', href: '/ocr-sales-orders', icon: ScanLine },
 ];
 
 export function Sidebar() {
