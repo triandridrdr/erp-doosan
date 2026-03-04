@@ -5,11 +5,286 @@
  */
 import { useMutation } from '@tanstack/react-query';
 import { AlertCircle, FileText, Loader2, Table as TableIcon, Type, Upload } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { Button } from '../../components/ui/Button';
 import { ocrPythonApi } from './api';
-import type { DocumentAnalysisResponse, DocumentAnalysisResponseData, OcrResponse, TableDto } from './types';
+import type {
+  DocumentAnalysisResponse,
+  DocumentAnalysisResponseData,
+  OcrResponse,
+  SalesOrderPayload,
+  TableDto,
+} from './types';
+
+type ErpHeaderRow = { field: string; value: string; editable: boolean };
+type ErpSizeRow = {
+  id: string;
+  color: string;
+  xs: number;
+  s: number;
+  m: number;
+  l: number;
+  xl: number;
+  total: number;
+  editable: boolean;
+};
+
+type ErpBomRow = {
+  id: string;
+  component: string;
+  category: string;
+  composition: string;
+  uom: string;
+  consumptionPerUnit: string;
+  wastePercent: string;
+  editable: boolean;
+};
+
+type ErpSystemStatus = {
+  status: 'DRAFT';
+  soValidation: 'SUCCESS' | 'ERROR';
+  bomStatus: 'INCOMPLETE';
+  source: 'OCR JSON';
+  warnings: string[];
+};
+
+type ErpDraft = {
+  headerRows: ErpHeaderRow[];
+  sizeRows: ErpSizeRow[];
+  bomRows: ErpBomRow[];
+  system: ErpSystemStatus;
+  tracking: {
+    salesOrderDraft: Record<string, unknown>;
+    salesOrderLines: Array<Record<string, unknown>>;
+    bomDraft: Array<Record<string, unknown>>;
+  };
+};
+
+const asString = (v: unknown) => (v === null || v === undefined ? '' : String(v));
+
+const newRowId = () => {
+  try {
+    const c = (globalThis as any)?.crypto;
+    if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+  } catch {
+    // ignore
+  }
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+};
+
+const toIntLoose = (v: unknown) => {
+  const s0 = asString(v).trim();
+  if (!s0) return 0;
+  const s = s0.replace(/,/g, '').replace(/\s+/g, '');
+  const m = s.match(/-?\d+/);
+  if (!m) return 0;
+  const n = Number.parseInt(m[0], 10);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const pickAny = (obj: unknown, keys: string[]) => {
+  if (!obj || typeof obj !== 'object') return undefined;
+  const o = obj as Record<string, unknown>;
+  for (const k of keys) {
+    if (k in o) return o[k];
+  }
+  const lk = Object.keys(o);
+  const wanted = new Set(keys.map((k) => k.toLowerCase()));
+  for (const k of lk) {
+    if (wanted.has(k.toLowerCase())) return o[k];
+  }
+  return undefined;
+};
+
+const parseToIsoDate = (raw: string) => {
+  const s = (raw || '').trim();
+  if (!s) return '';
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return s;
+  const m = s.match(/^(\d{1,2})[\./-](\d{1,2})[\./-](\d{2,4})$/);
+  if (!m) return s;
+  const dd = Number.parseInt(m[1], 10);
+  const mm = Number.parseInt(m[2], 10);
+  let yy = Number.parseInt(m[3], 10);
+  if (yy < 100) yy = 2000 + yy;
+  if (!Number.isFinite(dd) || !Number.isFinite(mm) || !Number.isFinite(yy)) return s;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${yy}-${pad(mm)}-${pad(dd)}`;
+};
+
+const inferBomCategoryAndUom = (component: string) => {
+  const c = (component || '').toUpperCase();
+  const isFabric =
+    c.includes('FABRIC') ||
+    c.includes('OUTER SHELL') ||
+    c.includes('SHELL') ||
+    c.includes('LINING') ||
+    c.includes('MAIN') ||
+    c.includes('SECONDARY');
+  if (isFabric) return { category: 'FABRIC', uom: 'METER' };
+  if (c.includes('TRIM') || c.includes('TRIMMING')) return { category: 'TRIMS', uom: 'PCS' };
+  if (c.includes('EMBELLISH')) return { category: 'EMBELLISHMENT', uom: 'PCS' };
+  return { category: 'TRIMS', uom: 'PCS' };
+};
+
+const parseCompositionPercents = (text: string) => {
+  const out: string[] = [];
+  const re = /(\d{1,3})\s*%\s*([A-Z][A-Z\s\-\/]*)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text || '')) !== null) {
+    const pct = m[1];
+    const mat = (m[2] || '').replace(/\s+/g, ' ').trim().toUpperCase();
+    if (!pct || !mat) continue;
+    out.push(`${pct}% ${mat}`);
+  }
+  return out.join(', ');
+};
+
+const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
+  const header = (payload?.header || {}) as Record<string, unknown>;
+  const ordernr = asString(pickAny(header, ['ordernr', 'order_nr', 'order_no', 'order']));
+  const dateRaw = asString(pickAny(header, ['date', 'orderdate', 'docdate']));
+  const season = asString(pickAny(header, ['season']));
+  const buyer = asString(pickAny(header, ['buyer']));
+  const supplier = asString(pickAny(header, ['supplier']));
+  const article = asString(pickAny(header, ['article', 'style', 'styleno']));
+  const paymentterms = asString(pickAny(header, ['paymentterms', 'payment_terms', 'terms']));
+  const marketoforigin = asString(pickAny(header, ['marketoforigin', 'market_of_origin', 'countryoforigin', 'origin']));
+  const totalorderInt = toIntLoose(pickAny(header, ['totalorder', 'total']));
+  const compositionsinformation = asString(
+    pickAny(header, ['compositionsinformation', 'compositioninformation', 'composition'])
+  );
+
+  const headerRows: ErpHeaderRow[] = [
+    { field: 'SO Number', value: ordernr, editable: true },
+    { field: 'Date (ISO)', value: parseToIsoDate(dateRaw), editable: true },
+    { field: 'Season', value: season, editable: true },
+    { field: 'Buyer Code', value: buyer, editable: true },
+    { field: 'Supplier', value: supplier, editable: true },
+    { field: 'Article', value: article, editable: true },
+    { field: 'Payment Terms', value: paymentterms, editable: true },
+    { field: 'Country of Origin', value: marketoforigin, editable: true },
+    { field: 'Total Qty', value: String(totalorderInt), editable: true },
+  ];
+
+  const grid = ((payload?.total_order as any)?.grid || []) as Array<Record<string, unknown>>;
+  const sizeRows: ErpSizeRow[] = grid.map((r) => {
+    const color = asString(pickAny(r, ['COLOUR', 'colour', 'Color', 'color']));
+    const xs = toIntLoose(pickAny(r, ['XS', 'xs']));
+    const s = toIntLoose(pickAny(r, ['S', 's']));
+    const m = toIntLoose(pickAny(r, ['M', 'm']));
+    const l = toIntLoose(pickAny(r, ['L', 'l']));
+    const xl = toIntLoose(pickAny(r, ['XL', 'xl']));
+    const total = xs + s + m + l + xl;
+    return { id: newRowId(), color, xs, s, m, l, xl, total, editable: true };
+  });
+
+  const sumSizes = sizeRows.reduce((acc, r) => acc + (Number.isFinite(r.total) ? r.total : 0), 0);
+  const warnings: string[] = [];
+  if (totalorderInt > 0 && sumSizes !== totalorderInt) {
+    const diff = sumSizes - totalorderInt;
+    warnings.push(`VALIDATION WARNING: size breakdown total (${sumSizes}) != header total (${totalorderInt}). Diff=${diff}.`);
+  }
+
+  const components = ['MAIN FABRIC', 'SECONDARY FABRIC', 'EMBELLISHMENT', 'OUTER SHELL', 'TRIMMINGS'];
+  const bomRowsRaw: ErpBomRow[] = [];
+
+  const compText = compositionsinformation || '';
+  const upper = compText.toUpperCase();
+  const hits = components
+    .map((k) => ({ k, i: upper.indexOf(k) }))
+    .filter((x) => x.i >= 0)
+    .sort((a, b) => a.i - b.i);
+
+  if (hits.length > 0) {
+    for (let idx = 0; idx < hits.length; idx++) {
+      const start = hits[idx].i;
+      const end = idx + 1 < hits.length ? hits[idx + 1].i : compText.length;
+      const chunk = compText.slice(start, end).trim();
+      const compKey = hits[idx].k;
+      const composition = parseCompositionPercents(chunk);
+      const { category, uom } = inferBomCategoryAndUom(compKey);
+      bomRowsRaw.push({
+        id: newRowId(),
+        component: compKey,
+        category,
+        composition,
+        uom,
+        consumptionPerUnit: '',
+        wastePercent: '',
+        editable: true,
+      });
+    }
+  } else if (compText.trim()) {
+    const composition = parseCompositionPercents(compText);
+    const { category, uom } = inferBomCategoryAndUom('MAIN FABRIC');
+    bomRowsRaw.push({
+      id: newRowId(),
+      component: 'MAIN FABRIC',
+      category,
+      composition,
+      uom,
+      consumptionPerUnit: '',
+      wastePercent: '',
+      editable: true,
+    });
+  }
+
+  const system: ErpSystemStatus = {
+    status: 'DRAFT',
+    soValidation: warnings.length === 0 ? 'SUCCESS' : 'ERROR',
+    bomStatus: 'INCOMPLETE',
+    source: 'OCR JSON',
+    warnings,
+  };
+
+  const salesOrderDraft = {
+    status: 'DRAFT',
+    so_number: ordernr,
+    date_iso: parseToIsoDate(dateRaw),
+    season,
+    buyer_code: buyer,
+    supplier,
+    article,
+    payment_terms: paymentterms,
+    country_of_origin: marketoforigin,
+    total_qty: totalorderInt,
+    editable: true,
+  };
+
+  const salesOrderLines = sizeRows.map((r) => ({
+    color: r.color,
+    xs: r.xs,
+    s: r.s,
+    m: r.m,
+    l: r.l,
+    xl: r.xl,
+    total: r.total,
+    editable: true,
+  }));
+
+  const bomDraft = bomRowsRaw.map((r) => ({
+    status: 'DRAFT',
+    article,
+    season,
+    component: r.component,
+    category: r.category,
+    composition: r.composition,
+    uom: r.uom,
+    consumption_per_unit: null,
+    waste_percent: null,
+    editable: true,
+  }));
+
+  return {
+    headerRows,
+    sizeRows,
+    bomRows: bomRowsRaw,
+    system,
+    tracking: { salesOrderDraft, salesOrderLines, bomDraft },
+  };
+};
 
 // OCR 모드 정의: 단순 추출(extract) vs 문서 분석(analyze)
 type OcrMode = 'extract' | 'analyze';
@@ -27,6 +302,7 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   const [mode, setMode] = useState<OcrMode>('extract'); // 현재 선택된 모드
   const [selectedFile, setSelectedFile] = useState<File | null>(null); // 업로드된 파일
   const [previewUrl, setPreviewUrl] = useState<string | null>(null); // 이미지 미리보기 URL
+  const [erpDraft, setErpDraft] = useState<ErpDraft | null>(null);
 
   // 텍스트 추출 Mutation
   const {
@@ -51,6 +327,23 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   });
 
   const isPending = isExtractPending || isAnalyzePending;
+
+  const salesOrderPayload = useMemo(() => {
+    const p = extractResult?.data?.salesOrderPayload;
+    return p && typeof p === 'object' ? (p as SalesOrderPayload) : null;
+  }, [extractResult?.data?.salesOrderPayload]);
+
+  useEffect(() => {
+    if (!salesOrderPayload) {
+      setErpDraft(null);
+      return;
+    }
+    try {
+      setErpDraft(buildErpDraft(salesOrderPayload));
+    } catch {
+      setErpDraft(null);
+    }
+  }, [salesOrderPayload]);
 
   // 모드 변경 핸들러
   const handleModeChange = (newMode: OcrMode) => {
@@ -372,22 +665,392 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                     const hasSalesOrderPayload = !!extractResult.data.salesOrderPayload;
                     return (
                       <>
-                        {!!extractResult.data.salesOrderPayload && (
-                          <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
-                            <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
-                              <h3 className='font-semibold text-gray-900'>Sales Order JSON Payload</h3>
-                              <p className='text-xs text-gray-500 mt-1'>Request body for ERP insert</p>
+                        {hasSalesOrderPayload && erpDraft && (
+                          <div className='space-y-8'>
+                            <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
+                              <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
+                                <h3 className='font-semibold text-gray-900'>SECTION 1 – SALES ORDER HEADER (DRAFT)</h3>
+                              </div>
+                              <div className='p-4 overflow-x-auto'>
+                                <table className='min-w-full divide-y divide-gray-200'>
+                                  <thead className='bg-gray-50'>
+                                    <tr>
+                                      <th className='px-4 py-2 text-left text-xs font-semibold text-gray-600'>Field</th>
+                                      <th className='px-4 py-2 text-left text-xs font-semibold text-gray-600'>Value</th>
+                                      <th className='px-4 py-2 text-left text-xs font-semibold text-gray-600'>Editable</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className='bg-white divide-y divide-gray-100'>
+                                    {erpDraft.headerRows.map((r) => (
+                                      <tr key={r.field}>
+                                        <td className='px-4 py-2 text-sm text-gray-700 whitespace-nowrap'>{r.field}</td>
+                                        <td className='px-4 py-2 text-sm text-gray-900'>
+                                          <input
+                                            className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
+                                            value={r.value}
+                                            onChange={(e) => {
+                                              setErpDraft((cur) => {
+                                                if (!cur) return cur;
+                                                return {
+                                                  ...cur,
+                                                  headerRows: cur.headerRows.map((x) =>
+                                                    x.field === r.field ? { ...x, value: e.target.value } : x
+                                                  ),
+                                                };
+                                              });
+                                            }}
+                                          />
+                                        </td>
+                                        <td className='px-4 py-2 text-sm text-gray-700'>{r.editable ? 'TRUE' : 'FALSE'}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
                             </div>
-                            <div className='p-4'>
-                              <details className='group' open>
-                                <summary className='text-sm font-medium text-gray-700 cursor-pointer list-none flex items-center'>
-                                  <span>View JSON</span>
-                                  <span className='ml-2 transition group-open:rotate-180 text-gray-400'>▼</span>
-                                </summary>
-                                <pre className='mt-3 text-xs font-mono whitespace-pre-wrap bg-gray-50 border border-gray-200 rounded p-3 max-h-96 overflow-y-auto'>
-                                  {JSON.stringify(extractResult.data.salesOrderPayload, null, 2)}
-                                </pre>
-                              </details>
+
+                            <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
+                              <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
+                                <div className='flex items-center justify-between gap-4'>
+                                  <h3 className='font-semibold text-gray-900'>SECTION 2 – SALES ORDER DETAIL (SIZE BREAKDOWN)</h3>
+                                  <Button
+                                    className='h-9 px-3 text-sm'
+                                    onClick={() => {
+                                      setErpDraft((cur) => {
+                                        if (!cur) return cur;
+                                        const next = [
+                                          ...cur.sizeRows,
+                                          { id: newRowId(), color: '', xs: 0, s: 0, m: 0, l: 0, xl: 0, total: 0, editable: true },
+                                        ];
+                                        const headerTotal = toIntLoose(
+                                          cur.headerRows.find((x) => x.field === 'Total Qty')?.value
+                                        );
+                                        const sumSizes = next.reduce((acc, rr) => acc + rr.total, 0);
+                                        const warnings: string[] = [];
+                                        if (headerTotal > 0 && sumSizes !== headerTotal) {
+                                          warnings.push(
+                                            `VALIDATION WARNING: size breakdown total (${sumSizes}) != header total (${headerTotal}). Diff=${sumSizes - headerTotal}.`
+                                          );
+                                        }
+                                        return {
+                                          ...cur,
+                                          sizeRows: next,
+                                          system: {
+                                            ...cur.system,
+                                            soValidation: warnings.length === 0 ? 'SUCCESS' : 'ERROR',
+                                            warnings,
+                                          },
+                                        };
+                                      });
+                                    }}
+                                  >
+                                    Add row
+                                  </Button>
+                                </div>
+                              </div>
+                              <div className='p-4 overflow-x-auto'>
+                                <table className='min-w-full divide-y divide-gray-200'>
+                                  <thead className='bg-gray-50'>
+                                    <tr>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Color</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>XS</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>S</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>M</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>L</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>XL</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Total</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Editable</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className='bg-white divide-y divide-gray-100'>
+                                    {erpDraft.sizeRows.map((r, idx) => (
+                                      <tr key={r.id}>
+                                        <td className='px-3 py-2 text-sm text-gray-700'>
+                                          <input
+                                            className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
+                                            value={r.color}
+                                            onChange={(e) => {
+                                              setErpDraft((cur) => {
+                                                if (!cur) return cur;
+                                                const next = [...cur.sizeRows];
+                                                next[idx] = { ...next[idx], color: e.target.value };
+                                                return { ...cur, sizeRows: next };
+                                              });
+                                            }}
+                                          />
+                                        </td>
+                                        {(['xs', 's', 'm', 'l', 'xl'] as const).map((k) => (
+                                          <td key={k} className='px-3 py-2 text-sm text-gray-900'>
+                                            <input
+                                              className='w-24 border border-gray-200 rounded px-2 py-1 text-sm'
+                                              value={String(r[k])}
+                                              onChange={(e) => {
+                                                const v = toIntLoose(e.target.value);
+                                                setErpDraft((cur) => {
+                                                  if (!cur) return cur;
+                                                  const next = [...cur.sizeRows];
+                                                  const row = { ...next[idx], [k]: v } as ErpSizeRow;
+                                                  row.total = row.xs + row.s + row.m + row.l + row.xl;
+                                                  next[idx] = row;
+                                                  const headerTotal = toIntLoose(
+                                                    cur.headerRows.find((x) => x.field === 'Total Qty')?.value
+                                                  );
+                                                  const sumSizes = next.reduce((acc, rr) => acc + rr.total, 0);
+                                                  const warnings: string[] = [];
+                                                  if (headerTotal > 0 && sumSizes !== headerTotal) {
+                                                    warnings.push(
+                                                      `VALIDATION WARNING: size breakdown total (${sumSizes}) != header total (${headerTotal}). Diff=${sumSizes - headerTotal}.`
+                                                    );
+                                                  }
+                                                  return {
+                                                    ...cur,
+                                                    sizeRows: next,
+                                                    system: {
+                                                      ...cur.system,
+                                                      soValidation: warnings.length === 0 ? 'SUCCESS' : 'ERROR',
+                                                      warnings,
+                                                    },
+                                                  };
+                                                });
+                                              }}
+                                            />
+                                          </td>
+                                        ))}
+                                        <td className='px-3 py-2 text-sm text-gray-900 font-semibold'>{r.total}</td>
+                                        <td className='px-3 py-2 text-sm text-gray-700'>{r.editable ? 'TRUE' : 'FALSE'}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
+                              <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
+                                <div className='flex items-center justify-between gap-4'>
+                                  <h3 className='font-semibold text-gray-900'>SECTION 3 – BILL OF MATERIALS (BOM DRAFT)</h3>
+                                  <Button
+                                    className='h-9 px-3 text-sm'
+                                    onClick={() => {
+                                      setErpDraft((cur) => {
+                                        if (!cur) return cur;
+                                        const next: ErpBomRow[] = [
+                                          ...cur.bomRows,
+                                          {
+                                            id: newRowId(),
+                                            component: '',
+                                            category: '',
+                                            composition: '',
+                                            uom: '',
+                                            consumptionPerUnit: '',
+                                            wastePercent: '',
+                                            editable: true,
+                                          },
+                                        ];
+                                        return { ...cur, bomRows: next };
+                                      });
+                                    }}
+                                  >
+                                    Add row
+                                  </Button>
+                                </div>
+                              </div>
+                              <div className='p-4 overflow-x-auto'>
+                                <table className='min-w-full divide-y divide-gray-200'>
+                                  <thead className='bg-gray-50'>
+                                    <tr>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Component</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Category</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Composition</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>UOM</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Consumption per Unit</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Waste %</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Editable</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className='bg-white divide-y divide-gray-100'>
+                                    {erpDraft.bomRows.length === 0 && (
+                                      <tr>
+                                        <td className='px-3 py-3 text-sm text-gray-500 italic' colSpan={7}>
+                                          No compositionsinformation detected.
+                                        </td>
+                                      </tr>
+                                    )}
+                                    {erpDraft.bomRows.map((r, idx) => (
+                                      <tr key={r.id}>
+                                        <td className='px-3 py-2 text-sm text-gray-700'>
+                                          <input
+                                            className='w-56 border border-gray-200 rounded px-2 py-1 text-sm'
+                                            value={r.component}
+                                            onChange={(e) => {
+                                              setErpDraft((cur) => {
+                                                if (!cur) return cur;
+                                                const next = [...cur.bomRows];
+                                                next[idx] = { ...next[idx], component: e.target.value };
+                                                return { ...cur, bomRows: next };
+                                              });
+                                            }}
+                                          />
+                                        </td>
+                                        <td className='px-3 py-2 text-sm text-gray-700'>
+                                          <input
+                                            className='w-40 border border-gray-200 rounded px-2 py-1 text-sm'
+                                            value={r.category}
+                                            onChange={(e) => {
+                                              setErpDraft((cur) => {
+                                                if (!cur) return cur;
+                                                const next = [...cur.bomRows];
+                                                next[idx] = { ...next[idx], category: e.target.value };
+                                                return { ...cur, bomRows: next };
+                                              });
+                                            }}
+                                          />
+                                        </td>
+                                        <td className='px-3 py-2 text-sm text-gray-900'>
+                                          <textarea
+                                            className='w-72 border border-gray-200 rounded px-2 py-1 text-sm'
+                                            rows={2}
+                                            value={r.composition}
+                                            onChange={(e) => {
+                                              setErpDraft((cur) => {
+                                                if (!cur) return cur;
+                                                const next = [...cur.bomRows];
+                                                next[idx] = { ...next[idx], composition: e.target.value };
+                                                return { ...cur, bomRows: next };
+                                              });
+                                            }}
+                                          />
+                                        </td>
+                                        <td className='px-3 py-2 text-sm text-gray-700'>
+                                          <input
+                                            className='w-28 border border-gray-200 rounded px-2 py-1 text-sm'
+                                            value={r.uom}
+                                            onChange={(e) => {
+                                              setErpDraft((cur) => {
+                                                if (!cur) return cur;
+                                                const next = [...cur.bomRows];
+                                                next[idx] = { ...next[idx], uom: e.target.value };
+                                                return { ...cur, bomRows: next };
+                                              });
+                                            }}
+                                          />
+                                        </td>
+                                        <td className='px-3 py-2 text-sm text-gray-900'>
+                                          <input
+                                            className='w-44 border border-gray-200 rounded px-2 py-1 text-sm'
+                                            value={r.consumptionPerUnit}
+                                            onChange={(e) => {
+                                              setErpDraft((cur) => {
+                                                if (!cur) return cur;
+                                                const next = [...cur.bomRows];
+                                                next[idx] = { ...next[idx], consumptionPerUnit: e.target.value };
+                                                return { ...cur, bomRows: next };
+                                              });
+                                            }}
+                                          />
+                                        </td>
+                                        <td className='px-3 py-2 text-sm text-gray-900'>
+                                          <input
+                                            className='w-28 border border-gray-200 rounded px-2 py-1 text-sm'
+                                            value={r.wastePercent}
+                                            onChange={(e) => {
+                                              setErpDraft((cur) => {
+                                                if (!cur) return cur;
+                                                const next = [...cur.bomRows];
+                                                next[idx] = { ...next[idx], wastePercent: e.target.value };
+                                                return { ...cur, bomRows: next };
+                                              });
+                                            }}
+                                          />
+                                        </td>
+                                        <td className='px-3 py-2 text-sm text-gray-700'>{r.editable ? 'TRUE' : 'FALSE'}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
+                              <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
+                                <h3 className='font-semibold text-gray-900'>SECTION 4 – SYSTEM STATUS</h3>
+                              </div>
+                              <div className='p-4 overflow-x-auto'>
+                                <table className='min-w-full divide-y divide-gray-200'>
+                                  <thead className='bg-gray-50'>
+                                    <tr>
+                                      <th className='px-4 py-2 text-left text-xs font-semibold text-gray-600'>Field</th>
+                                      <th className='px-4 py-2 text-left text-xs font-semibold text-gray-600'>Value</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className='bg-white divide-y divide-gray-100'>
+                                    <tr>
+                                      <td className='px-4 py-2 text-sm text-gray-700'>Status</td>
+                                      <td className='px-4 py-2 text-sm text-gray-900'>{erpDraft.system.status}</td>
+                                    </tr>
+                                    <tr>
+                                      <td className='px-4 py-2 text-sm text-gray-700'>SO Validation</td>
+                                      <td className='px-4 py-2 text-sm text-gray-900'>{erpDraft.system.soValidation}</td>
+                                    </tr>
+                                    <tr>
+                                      <td className='px-4 py-2 text-sm text-gray-700'>BoM Status</td>
+                                      <td className='px-4 py-2 text-sm text-gray-900'>{erpDraft.system.bomStatus}</td>
+                                    </tr>
+                                    <tr>
+                                      <td className='px-4 py-2 text-sm text-gray-700'>Source</td>
+                                      <td className='px-4 py-2 text-sm text-gray-900'>{erpDraft.system.source}</td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            {erpDraft.system.warnings.length > 0 && (
+                              <div className='bg-amber-50 border border-amber-200 rounded-lg p-4'>
+                                <div className='font-semibold text-amber-900 mb-2'>=== VALIDATION WARNING ===</div>
+                                <div className='space-y-1'>
+                                  {erpDraft.system.warnings.map((w, i) => (
+                                    <div key={i} className='text-sm text-amber-900'>
+                                      {w}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
+                              <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
+                                <h3 className='font-semibold text-gray-900'>Output JSON (Tracking)</h3>
+                              </div>
+                              <div className='p-4 overflow-x-auto'>
+                                <table className='min-w-full divide-y divide-gray-200'>
+                                  <thead className='bg-gray-50'>
+                                    <tr>
+                                      <th className='px-4 py-2 text-left text-xs font-semibold text-gray-600'>Object</th>
+                                      <th className='px-4 py-2 text-left text-xs font-semibold text-gray-600'>JSON</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className='bg-white divide-y divide-gray-100'>
+                                    {([
+                                      ['Sales Order Draft', erpDraft.tracking.salesOrderDraft],
+                                      ['Sales Order Lines', erpDraft.tracking.salesOrderLines],
+                                      ['BoM Draft', erpDraft.tracking.bomDraft],
+                                    ] as const).map(([name, obj]) => (
+                                      <tr key={name}>
+                                        <td className='px-4 py-2 text-sm text-gray-700 whitespace-nowrap'>{name}</td>
+                                        <td className='px-4 py-2 text-sm text-gray-900'>
+                                          <textarea
+                                            className='w-full border border-gray-200 rounded px-2 py-1 text-xs font-mono'
+                                            rows={6}
+                                            value={JSON.stringify(obj, null, 2)}
+                                            readOnly
+                                          />
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
                             </div>
                           </div>
                         )}

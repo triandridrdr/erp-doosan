@@ -23,8 +23,20 @@ export interface OcrResponseData {
   formFields?: Record<string, string>;
 
   // (Optional) ERP insert-ready Sales Order payload
-  salesOrderPayload?: unknown;
+  salesOrderPayload?: SalesOrderPayload;
 }
+
+export type SalesOrderPayload = {
+  header?: Record<string, unknown>;
+  total_order?: {
+    grid?: Array<Record<string, unknown>>;
+    unit_lot?: unknown;
+  };
+  partial_delivery_headers?: unknown;
+  partial_delivery_lines?: unknown;
+  document_type?: unknown;
+  line_items?: unknown;
+};
 
 // OCR API 응답 구조
 export interface OcrResponse {

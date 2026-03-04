@@ -6275,6 +6275,46 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
 
+    # Match PDF fast-path behavior for image inputs: normalize size grid columns and
+    # add TOTAL ORDER-from-text fallback when tables are missing/misclassified.
+    try:
+        for t in combined_tables:
+            if not isinstance(t, dict):
+                continue
+            if str(t.get("table_kind") or "").strip().lower() in {"total_order_grid", "partial_deliveries_grid"}:
+                try:
+                    _normalize_size_grid_columns(t)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        payload0 = _build_sales_order_payload(combined_tables)
+        grid0 = ((payload0.get("total_order") or {}).get("grid")) if isinstance(payload0, dict) else None
+        if not (isinstance(grid0, list) and len(grid0) > 0):
+            parsed = _parse_total_order_from_text("\n".join(combined_texts))
+            if isinstance(parsed, dict):
+                unit_lot = parsed.get("unit_lot") if isinstance(parsed.get("unit_lot"), str) else None
+                if unit_lot is not None:
+                    try:
+                        rows_p = parsed.get("rows")
+                        if isinstance(rows_p, list):
+                            rows_p.append({"COLOUR": "UNIT LOT", "XS": str(unit_lot)})
+                            parsed["rows"] = rows_p
+                    except Exception:
+                        pass
+                combined_tables.append(parsed)
+                combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
+                try:
+                    for t in combined_tables:
+                        if isinstance(t, dict) and str(t.get("table_kind") or "").strip().lower() == "total_order_grid":
+                            _normalize_size_grid_columns(t)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     try:
         if str(os.getenv("DEBUG_TABLE_KIND_DUMP") or "").strip() in {"1", "true", "True", "YES", "yes"}:
             try:
@@ -6869,6 +6909,46 @@ async def ocr_extract(
             combined_tables.append(tt)
 
     combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
+
+    # Match PDF fast-path behavior for image inputs: normalize size grid columns and
+    # add TOTAL ORDER-from-text fallback when tables are missing/misclassified.
+    try:
+        for t in combined_tables:
+            if not isinstance(t, dict):
+                continue
+            if str(t.get("table_kind") or "").strip().lower() in {"total_order_grid", "partial_deliveries_grid"}:
+                try:
+                    _normalize_size_grid_columns(t)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        payload0 = _build_sales_order_payload(combined_tables)
+        grid0 = ((payload0.get("total_order") or {}).get("grid")) if isinstance(payload0, dict) else None
+        if not (isinstance(grid0, list) and len(grid0) > 0):
+            parsed = _parse_total_order_from_text("\n".join(combined_texts))
+            if isinstance(parsed, dict):
+                unit_lot = parsed.get("unit_lot") if isinstance(parsed.get("unit_lot"), str) else None
+                if unit_lot is not None:
+                    try:
+                        rows_p = parsed.get("rows")
+                        if isinstance(rows_p, list):
+                            rows_p.append({"COLOUR": "UNIT LOT", "XS": str(unit_lot)})
+                            parsed["rows"] = rows_p
+                    except Exception:
+                        pass
+                combined_tables.append(parsed)
+                combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
+                try:
+                    for t in combined_tables:
+                        if isinstance(t, dict) and str(t.get("table_kind") or "").strip().lower() == "total_order_grid":
+                            _normalize_size_grid_columns(t)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     try:
         if str(os.getenv("DEBUG_PARTIAL_DELIVERIES") or "").strip() in {"1", "true", "True", "YES", "yes"}:
