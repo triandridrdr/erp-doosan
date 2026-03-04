@@ -13,6 +13,8 @@ import { SignupPage } from '../features/auth/SignupPage';
 import { StockListPage } from '../features/inventory/StockListPage';
 import { OcrPage } from '../features/ocr/OcrPage';
 import { OcrPythonPage } from '../features/ocr/OcrPythonPage';
+import { OcrBomDetailPage } from '../features/ocr/OcrBomDetailPage';
+import { OcrBomPage } from '../features/ocr/OcrBomPage';
 import { OcrSalesOrderDetailPage } from '../features/ocr/OcrSalesOrderDetailPage';
 import { OcrSalesOrdersPage } from '../features/ocr/OcrSalesOrdersPage';
 import { SalesOrderListPage } from '../features/sales/SalesOrderListPage';
@@ -154,6 +156,8 @@ const router = createBrowserRouter([
       { path: 'ocr-python', element: <OcrPythonPage /> }, // OCR with Python
       { path: 'ocr-sales-orders', element: <OcrSalesOrdersPage /> },
       { path: 'ocr-sales-orders/:id', element: <OcrSalesOrderDetailPage /> },
+      { path: 'ocr-bom', element: <OcrBomPage /> },
+      { path: 'ocr-bom/:id', element: <OcrBomDetailPage /> },
     ],
   },
   {

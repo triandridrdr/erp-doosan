@@ -20,6 +20,7 @@ export function MainLayout() {
       '/ocr': 'OCR Extraction',
       '/ocr-python': 'OCR with Python',
       '/ocr-sales-orders': 'Sales Order from OCR',
+      '/ocr-bom': 'BoM from OCR',
     }[location.pathname] || 'Overview';
 
   return (

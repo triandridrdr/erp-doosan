@@ -5,20 +5,6 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '../../components/ui/Button';
 import { bomMasterApi, ocrDraftApi } from './api';
 
-type HeaderRow = { field: string; value: string; editable?: boolean };
-
-type SizeRow = {
-  id: string;
-  color: string;
-  xs: number;
-  s: number;
-  m: number;
-  l: number;
-  xl: number;
-  total: number;
-  editable?: boolean;
-};
-
 type BomRow = {
   id: string;
   component: string;
@@ -32,8 +18,8 @@ type BomRow = {
 
 type DraftEditorPayload = {
   system?: any;
-  headerRows: HeaderRow[];
-  sizeRows: SizeRow[];
+  headerRows?: any[];
+  sizeRows?: any[];
   bomRows: BomRow[];
 };
 
@@ -45,14 +31,10 @@ type BomMasterListItem = {
   status?: string;
 };
 
-const toIntLoose = (v: unknown) => {
-  const s0 = v === null || v === undefined ? '' : String(v);
-  const s = s0.trim();
-  if (!s) return 0;
-  const m = s.replace(/,/g, '').match(/-?\d+/);
-  if (!m) return 0;
-  const n = Number.parseInt(m[0], 10);
-  return Number.isFinite(n) ? n : 0;
+const getHeaderValue = (headerRows: any[] | undefined, fieldName: string) => {
+  const rows = Array.isArray(headerRows) ? headerRows : [];
+  const hit = rows.find((r) => String(r?.field || '').trim() === fieldName);
+  return hit?.value ? String(hit.value) : '';
 };
 
 const newRowId = () => {
@@ -65,7 +47,7 @@ const newRowId = () => {
   return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
 };
 
-export function OcrSalesOrderDetailPage() {
+export function OcrBomDetailPage() {
   const params = useParams();
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -76,9 +58,64 @@ export function OcrSalesOrderDetailPage() {
     state: 'idle',
   });
 
+  const [manualStyleNo, setManualStyleNo] = useState('');
+  const [manualArticle, setManualArticle] = useState('');
+
   const [isAttachOpen, setIsAttachOpen] = useState(false);
   const [attachStyleNo, setAttachStyleNo] = useState('');
   const [attachArticle, setAttachArticle] = useState('');
+
+  const [draft, setDraft] = useState<DraftEditorPayload | null>(null);
+
+  const { mutate: saveAsBomMaster, isPending: isSaveAsBomPending } = useMutation({
+    mutationFn: async () => {
+      const styleNo = getHeaderValue(draft?.headerRows, 'Style No') || manualStyleNo;
+      const article = getHeaderValue(draft?.headerRows, 'Article') || manualArticle;
+      if (!styleNo.trim() || !article.trim()) {
+        throw new Error('Style No and Article are required');
+      }
+
+      const lines = (draft?.bomRows || []).map((r, idx) => ({
+        lineNo: idx + 1,
+        component: r.component,
+        category: r.category,
+        composition: r.composition,
+        uom: r.uom,
+        consumptionPerUnit: r.consumptionPerUnit,
+        wastePercent: r.wastePercent,
+      }));
+
+      const created = await bomMasterApi.create({ styleNo, article, lines });
+      const bomId = created?.data?.id;
+      if (!bomId) {
+        throw new Error('Failed to create BoM master');
+      }
+
+      const nextDraft = {
+        ...(draft as any),
+        system: {
+          ...((draft as any)?.system || {}),
+          bomMasterId: bomId,
+        },
+      };
+
+      await ocrDraftApi.update(id, {
+        sourceFilename: data?.sourceFilename,
+        soNumber: data?.soNumber,
+        draft: nextDraft,
+      });
+
+      return bomId as number;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ocr-drafts'] });
+      qc.invalidateQueries({ queryKey: ['ocr-draft', id] });
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message || err?.message || 'Save as BoM master failed';
+      setSaveStatus({ state: 'error', message: String(msg) });
+    },
+  });
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['ocr-draft', id],
@@ -91,27 +128,22 @@ export function OcrSalesOrderDetailPage() {
 
   const status = (data?.status as string) || 'DRAFT';
 
+  const currentBomMasterId = (data as any)?.draft?.system?.bomMasterId ?? (draft as any)?.system?.bomMasterId;
+
+  const { data: bomSearchData, isFetching: isBomSearching, refetch: refetchBomSearch } = useQuery({
+    queryKey: ['bom-masters', attachStyleNo, attachArticle],
+    enabled: false,
+    queryFn: async () => {
+      const res = await bomMasterApi.search({ styleNo: attachStyleNo, article: attachArticle });
+      return res?.data as BomMasterListItem[];
+    },
+  });
+
   const initialDraft = useMemo(() => {
     const d = data?.draft;
     if (!d || typeof d !== 'object') return null;
-    const headerRows = Array.isArray((d as any).headerRows) ? ((d as any).headerRows as HeaderRow[]) : [];
-    const sizeRows = Array.isArray((d as any).sizeRows) ? ((d as any).sizeRows as SizeRow[]) : [];
+
     const bomRows = Array.isArray((d as any).bomRows) ? ((d as any).bomRows as BomRow[]) : [];
-    const system = (d as any).system;
-
-    const normSizeRows = sizeRows.map((r) => ({
-      id: r.id || newRowId(),
-      color: r.color || '',
-      xs: toIntLoose((r as any).xs),
-      s: toIntLoose((r as any).s),
-      m: toIntLoose((r as any).m),
-      l: toIntLoose((r as any).l),
-      xl: toIntLoose((r as any).xl),
-      total: toIntLoose((r as any).total),
-      editable: true,
-    }));
-
-    const fixedSizeRows = normSizeRows.map((r) => ({ ...r, total: r.xs + r.s + r.m + r.l + r.xl }));
 
     const normBomRows = bomRows.map((r) => ({
       id: r.id || newRowId(),
@@ -124,18 +156,24 @@ export function OcrSalesOrderDetailPage() {
       editable: true,
     }));
 
-    const normHeaderRows = headerRows.map((r) => ({ field: r.field, value: r.value || '', editable: true }));
-
-    return { system, headerRows: normHeaderRows, sizeRows: fixedSizeRows, bomRows: normBomRows } as DraftEditorPayload;
+    return {
+      system: (d as any).system,
+      headerRows: (d as any).headerRows,
+      sizeRows: (d as any).sizeRows,
+      bomRows: normBomRows,
+    } as DraftEditorPayload;
   }, [data]);
-
-  const [draft, setDraft] = useState<DraftEditorPayload | null>(null);
-
-  const bomMasterId = (draft as any)?.system?.bomMasterId ?? (data as any)?.draft?.system?.bomMasterId;
-  const hasBomMasterId = bomMasterId !== undefined && bomMasterId !== null && String(bomMasterId).trim() !== '';
 
   if (draft === null && initialDraft !== null) {
     setDraft(initialDraft);
+  }
+
+  if (draft !== null) {
+    const headerStyleNo = getHeaderValue(draft.headerRows, 'Style No');
+    const headerArticle = getHeaderValue(draft.headerRows, 'Article');
+
+    if (headerStyleNo && !manualStyleNo) setManualStyleNo(headerStyleNo);
+    if (headerArticle && !manualArticle) setManualArticle(headerArticle);
   }
 
   const { mutate: saveDraft, isPending: isSavePending } = useMutation({
@@ -152,40 +190,21 @@ export function OcrSalesOrderDetailPage() {
     },
   });
 
-  const { mutate: approveDraft, isPending: isApprovePending } = useMutation({
-    mutationFn: () => ocrDraftApi.approve(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['ocr-drafts'] });
-      qc.invalidateQueries({ queryKey: ['ocr-draft', id] });
-    },
-  });
-
-  const { data: bomSearchData, isFetching: isBomSearching, refetch: refetchBomSearch } = useQuery({
-    queryKey: ['bom-masters', attachStyleNo, attachArticle],
-    enabled: false,
-    queryFn: async () => {
-      const res = await bomMasterApi.search({ styleNo: attachStyleNo, article: attachArticle });
-      return res?.data as BomMasterListItem[];
-    },
-  });
-
   const { mutate: attachBom, isPending: isAttachPending } = useMutation({
     mutationFn: async (bomId: number) => {
       if (!draft) throw new Error('Draft not loaded');
+
       const nextDraft = {
-        ...draft,
+        ...(draft as any),
         system: {
-          ...(draft as any).system,
+          ...((draft as any)?.system || {}),
           bomMasterId: bomId,
         },
       };
 
-      const headerMap = new Map(draft.headerRows.map((r) => [r.field, r.value] as const));
-      const soNumber = headerMap.get('SO Number') || data?.soNumber || '';
-
       await ocrDraftApi.update(id, {
         sourceFilename: data?.sourceFilename,
-        soNumber,
+        soNumber: data?.soNumber,
         draft: nextDraft,
       });
 
@@ -206,7 +225,7 @@ export function OcrSalesOrderDetailPage() {
     return (
       <div className='space-y-4'>
         <div className='text-red-600'>Invalid draft id</div>
-        <Button variant='outline' onClick={() => navigate('/ocr-sales-orders')}>
+        <Button variant='outline' onClick={() => navigate('/ocr-bom')}>
           Back
         </Button>
       </div>
@@ -221,7 +240,7 @@ export function OcrSalesOrderDetailPage() {
     return (
       <div className='space-y-4'>
         <div className='text-red-600'>Failed to load draft.</div>
-        <Button variant='outline' onClick={() => navigate('/ocr-sales-orders')}>
+        <Button variant='outline' onClick={() => navigate('/ocr-bom')}>
           Back
         </Button>
       </div>
@@ -230,11 +249,9 @@ export function OcrSalesOrderDetailPage() {
 
   const onSave = () => {
     if (!draft) return;
-    const headerMap = new Map(draft.headerRows.map((r) => [r.field, r.value] as const));
-    const soNumber = headerMap.get('SO Number') || data?.soNumber || '';
     saveDraft({
       sourceFilename: data?.sourceFilename,
-      soNumber,
+      soNumber: data?.soNumber,
       draft,
     });
   };
@@ -244,16 +261,16 @@ export function OcrSalesOrderDetailPage() {
       <div className='flex items-center justify-between'>
         <div className='space-y-1'>
           <div className='text-sm text-gray-500'>OCR Draft ID: {id}</div>
-          <h1 className='text-2xl font-bold text-gray-900'>Sales Order from OCR</h1>
+          <h1 className='text-2xl font-bold text-gray-900'>BoM from OCR</h1>
           <div className='text-sm text-gray-600'>Status: {status}</div>
+          {currentBomMasterId !== undefined && currentBomMasterId !== null && String(currentBomMasterId).trim() !== '' && (
+            <div className='text-sm text-gray-600'>Attached BoM Master ID: {String(currentBomMasterId)}</div>
+          )}
         </div>
         <div className='flex items-center gap-2'>
           {saveStatus.state === 'error' && <div className='text-sm text-red-600'>{saveStatus.message}</div>}
           {saveStatus.state === 'saved' && <div className='text-sm text-green-700'>Saved</div>}
-          {!hasBomMasterId && String(status).toUpperCase() !== 'APPROVED' && (
-            <div className='text-sm text-red-600'>Attach BoM master first to approve.</div>
-          )}
-          <Button variant='outline' onClick={() => navigate('/ocr-sales-orders')}>
+          <Button variant='outline' onClick={() => navigate('/ocr-bom')}>
             Back
           </Button>
           <Button onClick={onSave} disabled={isSavePending}>
@@ -261,36 +278,56 @@ export function OcrSalesOrderDetailPage() {
           </Button>
           <Button
             className='bg-indigo-600 hover:bg-indigo-700'
-            onClick={() => setIsAttachOpen(true)}
+            onClick={() => setIsAttachOpen((v) => !v)}
             disabled={isAttachPending}
           >
-            Attach BoM
+            Attach BoM Master
           </Button>
           <Button
-            className='bg-green-600 hover:bg-green-700'
-            onClick={() => {
-              if (!hasBomMasterId) return;
-              approveDraft();
-            }}
-            disabled={
-              isApprovePending ||
-              String(status).toUpperCase() === 'APPROVED' ||
-              !hasBomMasterId
-            }
+            className='bg-indigo-600 hover:bg-indigo-700'
+            onClick={() => saveAsBomMaster()}
+            disabled={isSaveAsBomPending}
           >
-            {String(status).toUpperCase() === 'APPROVED' ? 'Approved' : isApprovePending ? 'Approving...' : 'Approve'}
+            {isSaveAsBomPending ? 'Saving as BoM...' : 'Save as BoM Master'}
           </Button>
+        </div>
+      </div>
+
+      <div className='bg-white rounded-lg border border-gray-200 p-4'>
+        <div className='grid grid-cols-1 md:grid-cols-2 gap-3'>
+          <div className='space-y-1'>
+            <div className='text-xs font-medium text-gray-600'>Style No</div>
+            <input
+              className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
+              value={manualStyleNo}
+              onChange={(e) => setManualStyleNo(e.target.value)}
+              placeholder='Style No'
+            />
+          </div>
+          <div className='space-y-1'>
+            <div className='text-xs font-medium text-gray-600'>Article</div>
+            <input
+              className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
+              value={manualArticle}
+              onChange={(e) => setManualArticle(e.target.value)}
+              placeholder='Article'
+            />
+          </div>
+        </div>
+        <div className='mt-2 text-xs text-gray-500'>
+          If header fields are missing/incorrect, fill these manually before clicking Save as BoM Master.
         </div>
       </div>
 
       {isAttachOpen && (
         <div className='bg-white rounded-lg border border-gray-200 p-4 space-y-3'>
           <div className='flex items-center justify-between'>
-            <div className='font-semibold text-gray-900'>Attach BoM Master</div>
+            <div className='font-semibold text-gray-900'>Select BoM Master</div>
             <Button variant='outline' onClick={() => setIsAttachOpen(false)}>
               Close
             </Button>
           </div>
+
           <div className='grid grid-cols-1 md:grid-cols-3 gap-2 items-end'>
             <div className='space-y-1'>
               <div className='text-xs font-medium text-gray-600'>Style No</div>
@@ -298,6 +335,7 @@ export function OcrSalesOrderDetailPage() {
                 className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
                 value={attachStyleNo}
                 onChange={(e) => setAttachStyleNo(e.target.value)}
+                placeholder='Style No'
               />
             </div>
             <div className='space-y-1'>
@@ -306,6 +344,7 @@ export function OcrSalesOrderDetailPage() {
                 className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
                 value={attachArticle}
                 onChange={(e) => setAttachArticle(e.target.value)}
+                placeholder='Article'
               />
             </div>
             <Button onClick={() => refetchBomSearch()} disabled={isBomSearching}>
@@ -355,140 +394,8 @@ export function OcrSalesOrderDetailPage() {
 
       <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
         <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
-          <h3 className='font-semibold text-gray-900'>SECTION 1 – SALES ORDER HEADER (DRAFT)</h3>
-        </div>
-        <div className='p-4 overflow-x-auto'>
-          <table className='min-w-full divide-y divide-gray-200'>
-            <thead className='bg-gray-50'>
-              <tr>
-                <th className='px-4 py-2 text-left text-xs font-semibold text-gray-600'>Field</th>
-                <th className='px-4 py-2 text-left text-xs font-semibold text-gray-600'>Value</th>
-              </tr>
-            </thead>
-            <tbody className='bg-white divide-y divide-gray-100'>
-              {draft.headerRows.map((r) => (
-                <tr key={r.field}>
-                  <td className='px-4 py-2 text-sm text-gray-700 whitespace-nowrap'>{r.field}</td>
-                  <td className='px-4 py-2 text-sm text-gray-900'>
-                    <input
-                      className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
-                      value={r.value}
-                      onChange={(e) => {
-                        setDraft((cur) => {
-                          if (!cur) return cur;
-                          return {
-                            ...cur,
-                            headerRows: cur.headerRows.map((x) => (x.field === r.field ? { ...x, value: e.target.value } : x)),
-                          };
-                        });
-                      }}
-                    />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
-        <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
           <div className='flex items-center justify-between gap-4'>
-            <h3 className='font-semibold text-gray-900'>SECTION 2 – SALES ORDER DETAIL (SIZE BREAKDOWN)</h3>
-            <Button
-              className='h-9 px-3 text-sm'
-              onClick={() => {
-                setDraft((cur) => {
-                  if (!cur) return cur;
-                  return {
-                    ...cur,
-                    sizeRows: [
-                      ...cur.sizeRows,
-                      { id: newRowId(), color: '', xs: 0, s: 0, m: 0, l: 0, xl: 0, total: 0, editable: true },
-                    ],
-                  };
-                });
-              }}
-            >
-              Add row
-            </Button>
-          </div>
-        </div>
-        <div className='p-4 overflow-x-auto'>
-          <table className='min-w-full divide-y divide-gray-200'>
-            <thead className='bg-gray-50'>
-              <tr>
-                <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Color</th>
-                <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>XS</th>
-                <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>S</th>
-                <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>M</th>
-                <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>L</th>
-                <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>XL</th>
-                <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Total</th>
-                <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Actions</th>
-              </tr>
-            </thead>
-            <tbody className='bg-white divide-y divide-gray-100'>
-              {draft.sizeRows.map((r, idx) => (
-                <tr key={r.id}>
-                  <td className='px-3 py-2 text-sm text-gray-700'>
-                    <input
-                      className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
-                      value={r.color}
-                      onChange={(e) => {
-                        setDraft((cur) => {
-                          if (!cur) return cur;
-                          const next = [...cur.sizeRows];
-                          next[idx] = { ...next[idx], color: e.target.value };
-                          return { ...cur, sizeRows: next };
-                        });
-                      }}
-                    />
-                  </td>
-                  {(['xs', 's', 'm', 'l', 'xl'] as const).map((k) => (
-                    <td key={k} className='px-3 py-2 text-sm text-gray-900'>
-                      <input
-                        className='w-24 border border-gray-200 rounded px-2 py-1 text-sm'
-                        value={String(r[k])}
-                        onChange={(e) => {
-                          const v = toIntLoose(e.target.value);
-                          setDraft((cur) => {
-                            if (!cur) return cur;
-                            const next = [...cur.sizeRows];
-                            const row = { ...next[idx], [k]: v } as SizeRow;
-                            row.total = row.xs + row.s + row.m + row.l + row.xl;
-                            next[idx] = row;
-                            return { ...cur, sizeRows: next };
-                          });
-                        }}
-                      />
-                    </td>
-                  ))}
-                  <td className='px-3 py-2 text-sm text-gray-900 font-semibold'>{r.total}</td>
-                  <td className='px-3 py-2 text-sm text-gray-700'>
-                    <Button
-                      className='h-8 px-3 text-sm bg-red-600 hover:bg-red-700'
-                      onClick={() => {
-                        setDraft((cur) => {
-                          if (!cur) return cur;
-                          return { ...cur, sizeRows: cur.sizeRows.filter((x) => x.id !== r.id) };
-                        });
-                      }}
-                    >
-                      Delete
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
-        <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>
-          <div className='flex items-center justify-between gap-4'>
-            <h3 className='font-semibold text-gray-900'>SECTION 3 – BILL OF MATERIALS (BOM DRAFT)</h3>
+            <h3 className='font-semibold text-gray-900'>BILL OF MATERIALS (BOM DRAFT)</h3>
             <Button
               className='h-9 px-3 text-sm'
               onClick={() => {

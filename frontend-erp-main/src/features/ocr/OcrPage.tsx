@@ -3,12 +3,12 @@
  * @description OCR 기능을 제공하는 페이지 컴포넌트입니다.
  * 이미지 파일을 업로드하여 단순 텍스트 추출 또는 상세 문서 분석(테이블, Key-Value)을 수행합니다.
  */
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { AlertCircle, FileText, Loader2, Table as TableIcon, Type, Upload } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import { Button } from '../../components/ui/Button';
-import { ocrDraftApi, ocrPythonApi } from './api';
+import { bomMasterApi, ocrDraftApi, ocrPythonApi } from './api';
 import type {
   DocumentAnalysisResponse,
   DocumentAnalysisResponseData,
@@ -47,6 +47,34 @@ type ErpSystemStatus = {
   bomStatus: 'INCOMPLETE';
   source: 'OCR JSON';
   warnings: string[];
+  bomMasterId?: number;
+};
+
+type BomMasterListItem = {
+  id: number;
+  styleNo: string;
+  article: string;
+  revision?: number;
+  status?: string;
+};
+
+type BomMasterLine = {
+  lineNo: number;
+  component?: string;
+  category?: string;
+  composition?: string;
+  uom?: string;
+  consumptionPerUnit?: string;
+  wastePercent?: string;
+};
+
+type BomMasterResponse = {
+  id: number;
+  styleNo: string;
+  article: string;
+  revision?: number;
+  status?: string;
+  lines?: BomMasterLine[];
 };
 
 type ErpDraft = {
@@ -403,6 +431,69 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
     state: 'idle',
   });
 
+  const [isAttachOpen, setIsAttachOpen] = useState(false);
+  const [attachStyleNo, setAttachStyleNo] = useState('');
+  const [attachArticle, setAttachArticle] = useState('');
+
+  const bomSearchQuery = useQuery({
+    queryKey: ['bom-masters', attachStyleNo, attachArticle],
+    enabled: false,
+    queryFn: async () => {
+      const res = await bomMasterApi.search({ styleNo: attachStyleNo, article: attachArticle });
+      return res?.data as BomMasterListItem[];
+    },
+  });
+
+  const attachBomMasterMutation = useMutation({
+    mutationFn: async (bomId: number) => {
+      if (!erpDraft) throw new Error('Draft not ready');
+      const draftId = saveStatus.id;
+
+      const bomRes = await bomMasterApi.get(bomId);
+      const bomMaster: BomMasterResponse | undefined = (bomRes as any)?.data ?? (bomRes as any);
+      const lines: BomMasterLine[] = (((bomMaster as any)?.lines ?? []) as BomMasterLine[]) || [];
+
+      const nextBomRows: ErpBomRow[] = lines.map((ln) => ({
+        id: newRowId(),
+        component: asString(ln.component),
+        category: asString(ln.category),
+        composition: asString(ln.composition),
+        uom: asString(ln.uom),
+        consumptionPerUnit: asString(ln.consumptionPerUnit),
+        wastePercent: asString(ln.wastePercent),
+        editable: true,
+      }));
+
+      const nextErpDraft: ErpDraft = {
+        ...erpDraft,
+        system: {
+          ...erpDraft.system,
+          bomMasterId: bomId,
+        },
+        bomRows: nextBomRows,
+      };
+
+      if (typeof draftId === 'number') {
+        const headerMap = new Map(nextErpDraft.headerRows.map((r) => [r.field, r.value] as const));
+        const soNumber = headerMap.get('SO Number') || '';
+        const payload = buildDraftPayloadForSave(nextErpDraft);
+
+        await ocrDraftApi.update(draftId, {
+          sourceFilename: selectedFile?.name,
+          soNumber,
+          draft: payload,
+        });
+      }
+
+      setErpDraft(nextErpDraft);
+      setIsAttachOpen(false);
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message || err?.message || 'Attach BoM failed';
+      setSaveStatus({ state: 'error', message: String(msg), id: saveStatus.id });
+    },
+  });
+
   // 텍스트 추출 Mutation
   const {
     mutate: extractText,
@@ -433,7 +524,7 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
       setSaveStatus({ state: 'saving' });
     },
     onSuccess: (res: any) => {
-      const id = res?.data?.id;
+      const id = res?.id;
       if (typeof id === 'number') setSaveStatus({ state: 'saved', id });
       else setSaveStatus({ state: 'saved' });
     },
@@ -815,9 +906,99 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                     >
                                       {saveStatus.state === 'saving' ? 'Saving...' : 'Save Draft'}
                                     </Button>
+                                    <Button
+                                      className='h-9 px-3 text-sm bg-indigo-600 hover:bg-indigo-700'
+                                      disabled={!erpDraft}
+                                      onClick={() => setIsAttachOpen((v) => !v)}
+                                    >
+                                      Attach BoM Master
+                                    </Button>
                                   </div>
                                 </div>
                               </div>
+
+                              {typeof (erpDraft as any)?.system?.bomMasterId === 'number' && (
+                                <div className='mt-3 text-xs text-gray-700'>
+                                  Attached BoM Master ID: {(erpDraft as any).system.bomMasterId}
+                                </div>
+                              )}
+
+                              {isAttachOpen && (
+                                <div className='mt-3 bg-white rounded-lg border border-gray-200 p-4 space-y-3'>
+                                  <div className='flex items-center justify-between'>
+                                    <div className='font-semibold text-gray-900'>Select BoM Master</div>
+                                    <Button variant='outline' onClick={() => setIsAttachOpen(false)}>
+                                      Close
+                                    </Button>
+                                  </div>
+
+                                  <div className='grid grid-cols-1 md:grid-cols-3 gap-2 items-end'>
+                                    <div className='space-y-1'>
+                                      <div className='text-xs font-medium text-gray-600'>Style No</div>
+                                      <input
+                                        className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
+                                        value={attachStyleNo}
+                                        onChange={(e) => setAttachStyleNo(e.target.value)}
+                                        placeholder='Style No'
+                                      />
+                                    </div>
+                                    <div className='space-y-1'>
+                                      <div className='text-xs font-medium text-gray-600'>Article</div>
+                                      <input
+                                        className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
+                                        value={attachArticle}
+                                        onChange={(e) => setAttachArticle(e.target.value)}
+                                        placeholder='Article'
+                                      />
+                                    </div>
+                                    <Button onClick={() => bomSearchQuery.refetch()} disabled={bomSearchQuery.isFetching}>
+                                      {bomSearchQuery.isFetching ? 'Searching...' : 'Search'}
+                                    </Button>
+                                  </div>
+
+                                  <div className='overflow-x-auto'>
+                                    <table className='min-w-full divide-y divide-gray-200'>
+                                      <thead className='bg-gray-50'>
+                                        <tr>
+                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>ID</th>
+                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Style No</th>
+                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Article</th>
+                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Revision</th>
+                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Status</th>
+                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Actions</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className='bg-white divide-y divide-gray-100'>
+                                        {((bomSearchQuery.data || []) as BomMasterListItem[]).length === 0 && (
+                                          <tr>
+                                            <td colSpan={6} className='px-3 py-4 text-sm text-gray-500'>
+                                              No results.
+                                            </td>
+                                          </tr>
+                                        )}
+                                        {((bomSearchQuery.data || []) as BomMasterListItem[]).map((b) => (
+                                          <tr key={b.id}>
+                                            <td className='px-3 py-2 text-sm text-gray-900'>{b.id}</td>
+                                            <td className='px-3 py-2 text-sm text-gray-700'>{b.styleNo}</td>
+                                            <td className='px-3 py-2 text-sm text-gray-700'>{b.article}</td>
+                                            <td className='px-3 py-2 text-sm text-gray-700'>{b.revision ?? '-'}</td>
+                                            <td className='px-3 py-2 text-sm text-gray-700'>{b.status ?? '-'}</td>
+                                            <td className='px-3 py-2 text-sm text-gray-700'>
+                                              <Button
+                                                className='h-8 px-3 text-sm'
+                                                onClick={() => attachBomMasterMutation.mutate(b.id)}
+                                                disabled={attachBomMasterMutation.isPending}
+                                              >
+                                                {attachBomMasterMutation.isPending ? 'Attaching...' : 'Attach'}
+                                              </Button>
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
+                              )}
                               <div className='p-4 overflow-x-auto'>
                                 <table className='min-w-full divide-y divide-gray-200'>
                                   <thead className='bg-gray-50'>
