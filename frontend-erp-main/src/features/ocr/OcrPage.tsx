@@ -128,7 +128,7 @@ const inferBomCategoryAndUom = (component: string) => {
   return { category: 'TRIMS', uom: 'PCS' };
 };
 
-const parseCompositionPercents = (text: string) => {
+const parseCompositionPercentItems = (text: string) => {
   const out: string[] = [];
   const re = /(\d{1,3})\s*%\s*([A-Z][A-Z\s\-\/]*)/gi;
   let m: RegExpExecArray | null;
@@ -138,7 +138,15 @@ const parseCompositionPercents = (text: string) => {
     if (!pct || !mat) continue;
     out.push(`${pct}% ${mat}`);
   }
-  return out.join(', ');
+  if (out.length > 0) return out;
+
+  const raw = (text || '').trim();
+  if (!raw) return [];
+  const parts = raw
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts : [raw];
 };
 
 const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
@@ -203,32 +211,62 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
       const end = idx + 1 < hits.length ? hits[idx + 1].i : compText.length;
       const chunk = compText.slice(start, end).trim();
       const compKey = hits[idx].k;
-      const composition = parseCompositionPercents(chunk);
+      const items = parseCompositionPercentItems(chunk);
       const { category, uom } = inferBomCategoryAndUom(compKey);
+      if (items.length > 0) {
+        for (const it of items) {
+          bomRowsRaw.push({
+            id: newRowId(),
+            component: compKey,
+            category,
+            composition: (it || '').replace(/,/g, '').trim(),
+            uom,
+            consumptionPerUnit: '',
+            wastePercent: '',
+            editable: true,
+          });
+        }
+      } else {
+        bomRowsRaw.push({
+          id: newRowId(),
+          component: compKey,
+          category,
+          composition: chunk.replace(/,/g, '').trim(),
+          uom,
+          consumptionPerUnit: '',
+          wastePercent: '',
+          editable: true,
+        });
+      }
+    }
+  } else if (compText.trim()) {
+    const items = parseCompositionPercentItems(compText);
+    const { category, uom } = inferBomCategoryAndUom('MAIN FABRIC');
+    if (items.length > 0) {
+      for (const it of items) {
+        bomRowsRaw.push({
+          id: newRowId(),
+          component: 'MAIN FABRIC',
+          category,
+          composition: (it || '').replace(/,/g, '').trim(),
+          uom,
+          consumptionPerUnit: '',
+          wastePercent: '',
+          editable: true,
+        });
+      }
+    } else {
       bomRowsRaw.push({
         id: newRowId(),
-        component: compKey,
+        component: 'MAIN FABRIC',
         category,
-        composition,
+        composition: compText.replace(/,/g, '').trim(),
         uom,
         consumptionPerUnit: '',
         wastePercent: '',
         editable: true,
       });
     }
-  } else if (compText.trim()) {
-    const composition = parseCompositionPercents(compText);
-    const { category, uom } = inferBomCategoryAndUom('MAIN FABRIC');
-    bomRowsRaw.push({
-      id: newRowId(),
-      component: 'MAIN FABRIC',
-      category,
-      composition,
-      uom,
-      consumptionPerUnit: '',
-      wastePercent: '',
-      editable: true,
-    });
   }
 
   const system: ErpSystemStatus = {
