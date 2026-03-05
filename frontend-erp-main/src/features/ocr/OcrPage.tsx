@@ -821,7 +821,10 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                       Analysis results
                     </h2>
                     <span className='text-sm font-medium text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-100'>
-                      Average confidence: {analyzeResult.data.averageConfidence.toFixed(1)}%
+                      Average confidence:{' '}
+                      {typeof analyzeResult.data.averageConfidence === 'number' && Number.isFinite(analyzeResult.data.averageConfidence)
+                        ? `${analyzeResult.data.averageConfidence.toFixed(1)}%`
+                        : '-'}
                     </span>
                   </div>
 
@@ -851,7 +854,9 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                   <div className='bg-indigo-50 p-4 rounded-lg flex items-center justify-between'>
                     <span className='text-sm font-medium text-indigo-900'>Average confidence</span>
                     <span className='text-lg font-bold text-indigo-600'>
-                      {extractResult.data.averageConfidence.toFixed(1)}%
+                      {typeof extractResult.data.averageConfidence === 'number' && Number.isFinite(extractResult.data.averageConfidence)
+                        ? `${extractResult.data.averageConfidence.toFixed(1)}%`
+                        : '-'}
                     </span>
                   </div>
 

@@ -33,6 +33,8 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -146,14 +148,14 @@ public class OcrService {
                     if (page.getLines() != null) {
                         return page.getLines().stream().map(line -> TextBlockDto.builder()
                                 .text(line.getText())
-                                .confidence(line.getConfidence() != null ? line.getConfidence().floatValue() : 0.0f)
+                                .confidence(line.getConfidence() != null ? line.getConfidence().floatValue() : null)
                                 .blockType("LINE")
                                 .build());
                     }
                     if (page.getWords() != null) {
                         return page.getWords().stream().map(word -> TextBlockDto.builder()
                                 .text(word.getText())
-                                .confidence(word.getConfidence() != null ? word.getConfidence().floatValue() : 0.0f)
+                                .confidence(word.getConfidence() != null ? word.getConfidence().floatValue() : null)
                                 .blockType("WORD")
                                 .build());
                     }
@@ -161,10 +163,12 @@ public class OcrService {
                 })
                 .toList();
 
-        float averageConfidence = (float) blocks.stream()
-                .mapToDouble(TextBlockDto::getConfidence)
-                .average()
-                .orElse(0.0);
+        OptionalDouble avgOpt = blocks.stream()
+                .map(TextBlockDto::getConfidence)
+                .filter(Objects::nonNull)
+                .mapToDouble(Float::doubleValue)
+                .average();
+        Float averageConfidence = avgOpt.isPresent() ? (float) avgOpt.getAsDouble() : null;
 
         Map<String, String> formFields = parsePythonFields(response.getFields());
         List<TableDto> tables = parsePythonTables(response.getTables());
@@ -523,7 +527,7 @@ public class OcrService {
                     if (page.getLines() != null) {
                         return page.getLines().stream().map(line -> TextBlockDto.builder()
                                 .text(line.getText())
-                                .confidence(line.getConfidence() != null ? line.getConfidence().floatValue() : 0.0f)
+                                .confidence(line.getConfidence() != null ? line.getConfidence().floatValue() : null)
                                 .blockType("LINE")
                                 .build());
                     }
@@ -533,10 +537,12 @@ public class OcrService {
 
         String extractedText = response.getText() != null ? response.getText().trim() : "";
 
-        float averageConfidence = (float) lines.stream()
-                .mapToDouble(TextBlockDto::getConfidence)
-                .average()
-                .orElse(0.0);
+        OptionalDouble avgOpt = lines.stream()
+                .map(TextBlockDto::getConfidence)
+                .filter(Objects::nonNull)
+                .mapToDouble(Float::doubleValue)
+                .average();
+        Float averageConfidence = avgOpt.isPresent() ? (float) avgOpt.getAsDouble() : null;
 
         return DocumentAnalysisResponse.builder()
                 .extractedText(extractedText)

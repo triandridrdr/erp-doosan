@@ -8,7 +8,7 @@
 // 텍스트 블록
 export interface TextBlockDto {
   text: string; // 추출된 텍스트
-  confidence: number; // 신뢰도 (0~100)
+  confidence: number | null; // 신뢰도 (0~100)
   blockType: string; // 블록 타입 (LINE, WORD 등)
 }
 
@@ -16,7 +16,7 @@ export interface TextBlockDto {
 export interface OcrResponseData {
   extractedText: string; // 전체 결합 텍스트
   blocks: TextBlockDto[]; // 개별 텍스트 블록 리스트
-  averageConfidence: number; // 평균 신뢰도
+  averageConfidence: number | null; // 평균 신뢰도
 
   // (Optional) Python OCR 등에서 제공될 수 있는 구조화 데이터
   tables?: TableDto[];
@@ -82,7 +82,7 @@ export interface DocumentAnalysisResponseData {
   tables: TableDto[]; // 감지된 테이블 목록
   keyValuePairs: KeyValueDto[]; // 감지된 키-값 쌍 목록
   formFields: Record<string, string>; // 단순화된 폼 필드 맵
-  averageConfidence: number;
+  averageConfidence: number | null;
 }
 
 // 문서 분석 API 응답 구조
