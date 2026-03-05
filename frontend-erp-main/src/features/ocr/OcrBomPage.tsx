@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 
 import { Button } from '../../components/ui/Button';
@@ -15,12 +15,21 @@ type DraftListItem = {
 
 export function OcrBomPage() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['ocr-drafts'],
     queryFn: async () => {
       const res = await ocrDraftApi.list();
-      return res?.data as DraftListItem[];
+      const out = (res?.data as DraftListItem[]) || [];
+      return out.filter((x) => (x.status || '').toUpperCase() !== 'DELETED');
+    },
+  });
+
+  const { mutate: deleteDraft, isPending: isDeletePending } = useMutation({
+    mutationFn: (id: number) => ocrDraftApi.delete(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ocr-drafts'] });
     },
   });
 
@@ -54,26 +63,27 @@ export function OcrBomPage() {
                 <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider'>Source File</th>
                 <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider'>Created</th>
                 <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider'>Status</th>
+                <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider'>Actions</th>
               </tr>
             </thead>
             <tbody className='bg-white divide-y divide-gray-200'>
               {isLoading && (
                 <tr>
-                  <td colSpan={5} className='px-6 py-10 text-center text-gray-500'>
+                  <td colSpan={6} className='px-6 py-10 text-center text-gray-500'>
                     Loading...
                   </td>
                 </tr>
               )}
               {error && (
                 <tr>
-                  <td colSpan={5} className='px-6 py-10 text-center text-red-500'>
+                  <td colSpan={6} className='px-6 py-10 text-center text-red-500'>
                     Failed to load OCR drafts.
                   </td>
                 </tr>
               )}
               {!isLoading && !error && (data || []).length === 0 && (
                 <tr>
-                  <td colSpan={5} className='px-6 py-10 text-center text-gray-500'>
+                  <td colSpan={6} className='px-6 py-10 text-center text-gray-500'>
                     No OCR drafts saved yet.
                   </td>
                 </tr>
@@ -93,6 +103,34 @@ export function OcrBomPage() {
                     <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', badgeClass(d.status))}>
                       {d.status || 'UNKNOWN'}
                     </span>
+                  </td>
+                  <td className='px-6 py-4 whitespace-nowrap'>
+                    <div className='flex items-center gap-2'>
+                      <Button
+                        className='h-8 px-3 text-sm'
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          navigate(`/ocr-bom-master/${d.id}`);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        className='h-8 px-3 text-sm bg-red-600 hover:bg-red-700'
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          if (isDeletePending) return;
+                          const ok = window.confirm(`Delete draft #${d.id}?`);
+                          if (!ok) return;
+                          deleteDraft(d.id);
+                        }}
+                        disabled={isDeletePending}
+                      >
+                        Delete
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))}

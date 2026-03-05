@@ -39,7 +39,6 @@ export function OcrSalesOrdersPage() {
         return 'bg-green-100 text-green-800';
       case 'DRAFT':
       case 'DELETED':
-        return 'bg-gray-100 text-gray-800';
         return 'bg-yellow-100 text-yellow-800';
       default:
         return 'bg-gray-100 text-gray-800';
@@ -107,20 +106,32 @@ export function OcrSalesOrdersPage() {
                     </span>
                   </td>
                   <td className='px-6 py-4 whitespace-nowrap'>
-                    <Button
-                      className='h-8 px-3 text-sm bg-red-600 hover:bg-red-700'
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (isDeletePending) return;
-                        const ok = window.confirm(`Delete draft #${d.id}?`);
-                        if (!ok) return;
-                        deleteDraft(d.id);
-                      }}
-                      disabled={isDeletePending}
-                    >
-                      Delete
-                    </Button>
+                    <div className='flex items-center gap-2'>
+                      <Button
+                        className='h-8 px-3 text-sm'
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          navigate(`/ocr-sales-orders/${d.id}`);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        className='h-8 px-3 text-sm bg-red-600 hover:bg-red-700'
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          if (isDeletePending) return;
+                          const ok = window.confirm(`Delete draft #${d.id}?`);
+                          if (!ok) return;
+                          deleteDraft(d.id);
+                        }}
+                        disabled={isDeletePending}
+                      >
+                        Delete
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))}
