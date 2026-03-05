@@ -3,7 +3,7 @@
  * @description 애플리케이션의 사이드바 네비게이션 컴포넌트입니다.
  * 주요 페이지로 이동하는 링크 목록과 현재 로그인한 사용자 정보를 표시합니다.
  */
-import { FileText, LayoutDashboard, LogOut, Package, ScanLine, ShoppingCart, User } from 'lucide-react';
+import { FileText, LayoutDashboard, LogOut, Package, ScanLine, ShoppingCart, Tag, User } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 
 import { useAuth } from '../../features/auth/AuthContext';
@@ -13,6 +13,7 @@ import { cn } from '../../lib/utils';
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Sales Orders', href: '/sales', icon: ShoppingCart },
+  { name: 'Styles', href: '/styles', icon: Tag },
   { name: 'Inventory', href: '/inventory', icon: Package },
   { name: 'Accounting', href: '/accounting', icon: FileText },
   { name: 'OCR Extraction', href: '/ocr', icon: ScanLine },

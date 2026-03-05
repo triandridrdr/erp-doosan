@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
 
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
 import { Modal } from '../../components/ui/Modal';
-import { productApi } from '../product/api';
 import type { Style, StyleRequest } from './api';
 
 interface StyleFormModalProps {
@@ -21,17 +19,6 @@ export function StyleFormModal({ isOpen, onClose, initial, isSaving, onSubmit }:
   const [styleName, setStyleName] = useState('');
   const [season, setSeason] = useState('');
   const [description, setDescription] = useState('');
-
-  const { data: productsRes } = useQuery({
-    queryKey: ['products'],
-    queryFn: async () => {
-      return productApi.list();
-    },
-    enabled: isOpen,
-    staleTime: 60 * 1000,
-  });
-
-  const products = productsRes?.data ?? [];
 
   useEffect(() => {
     if (!isOpen) return;
@@ -58,21 +45,8 @@ export function StyleFormModal({ isOpen, onClose, initial, isSaving, onSubmit }:
           });
         }}
       >
-        <div className='w-full space-y-2'>
-          <label className='text-sm font-semibold text-gray-700'>Product</label>
-          <select
-            className='flex h-12 w-full rounded-xl border border-gray-200 bg-gray-50/50 px-3 py-2 text-sm text-gray-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all duration-200'
-            value={productId}
-            onChange={(e) => setProductId(e.target.value)}
-          >
-            <option value=''>Select product</option>
-            {products.map((p) => (
-              <option key={p.id} value={String(p.id)}>
-                {p.productName ? `${p.productName} (ID: ${p.id})` : `ID: ${p.id}`}
-              </option>
-            ))}
-          </select>
-        </div>
+        <label className='text-sm font-semibold text-gray-700'>Product ID</label>
+        <Input placeholder='Product ID' value={productId} onChange={(e) => setProductId(e.target.value)} />
         <label className='text-sm font-semibold text-gray-700'>Style Code </label>
         <Input
           placeholder='Style code'

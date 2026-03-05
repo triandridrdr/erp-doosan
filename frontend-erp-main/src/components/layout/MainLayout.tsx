@@ -15,6 +15,7 @@ export function MainLayout() {
     {
       '/': 'Dashboard',
       '/sales': 'Sales Orders',
+      '/styles': 'Styles',
       '/inventory': 'Inventory',
       '/accounting': 'Accounting',
       '/ocr': 'OCR Extraction',

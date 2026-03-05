@@ -18,6 +18,7 @@ import { OcrBomPage } from '../features/ocr/OcrBomPage';
 import { OcrSalesOrderDetailPage } from '../features/ocr/OcrSalesOrderDetailPage';
 import { OcrSalesOrdersPage } from '../features/ocr/OcrSalesOrdersPage';
 import { SalesOrderListPage } from '../features/sales/SalesOrderListPage';
+import { StyleListPage } from '../features/style/StyleListPage';
 
 /**
  * 보호된 라우트 (Protected Route) 래퍼 컴포넌트
@@ -150,6 +151,7 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <Dashboard /> }, // 기본 경로 (대시보드)
       { path: 'sales', element: <SalesOrderListPage /> }, // 영업 관리
+      { path: 'styles', element: <StyleListPage /> },
       { path: 'inventory', element: <StockListPage /> }, // 재고 관리
       { path: 'accounting', element: <JournalEntryListPage /> }, // 회계 관리
       { path: 'ocr', element: <OcrPage /> }, // OCR 기능
