@@ -389,14 +389,24 @@ def _parse_total_order_from_text(txt: str) -> Optional[Dict[str, Any]]:
             unit_lot = str(m.group(1) or "").strip() or None
             break
 
-    # Find the header row with size tokens
+    # Find the header row with size tokens.
+    # Some documents don't have XL column (only XS/S/M/L/Total). Keep this dynamic.
+    size_tokens = ["XS", "S", "M", "L", "XL", "XXL"]
     header_idx = None
+    header_sizes: List[str] = []
     for i, ln in enumerate(chunk[:10]):
-        if re.search(r"\bCOLOU?R\b", ln, flags=re.IGNORECASE) and re.search(r"\bXS\b", ln) and re.search(r"\bXL\b", ln, flags=re.IGNORECASE):
+        if re.search(r"\bCOLOU?R\b", ln, flags=re.IGNORECASE) is None:
+            continue
+        hits = [tok for tok in size_tokens if re.search(r"\b" + re.escape(tok) + r"\b", ln, flags=re.IGNORECASE) is not None]
+        # require at least 2 size columns to consider it a size grid header
+        if len(hits) >= 2:
             header_idx = i
+            header_sizes = hits
             break
-    if header_idx is None:
+    if header_idx is None or not header_sizes:
         return None
+
+    expected_num_count = len(header_sizes) + 1  # sizes + Total
 
     out_rows: List[Dict[str, str]] = []
 
@@ -447,9 +457,9 @@ def _parse_total_order_from_text(txt: str) -> Optional[Dict[str, Any]]:
         if tail:
             nums.extend(_extract_nums(tail))
 
-        # pdf text sometimes wraps numbers onto next lines; accumulate until we have XS..Total (6 nums)
+        # pdf text sometimes wraps numbers onto next lines; accumulate until we have sizes..Total
         j = i + 1
-        while len(nums) < 6 and j < len(chunk):
+        while len(nums) < expected_num_count and j < len(chunk):
             nxt = chunk[j]
             if re.search(r"\bUNIT\s*LOT\b", nxt, flags=re.IGNORECASE):
                 break
@@ -467,9 +477,12 @@ def _parse_total_order_from_text(txt: str) -> Optional[Dict[str, Any]]:
             nums.extend(_extract_nums(nxt))
             j += 1
 
-        if len(nums) >= 6:
-            xs, s2, m2, l2, xl2, tot = nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]
-            out_rows.append({"COLOUR": colour, "XS": xs, "S": s2, "M": m2, "L": l2, "XL": xl2, "Total": tot})
+        if len(nums) >= expected_num_count:
+            row: Dict[str, str] = {"COLOUR": colour}
+            for k, tok in enumerate(header_sizes):
+                row[tok] = nums[k]
+            row["Total"] = nums[len(header_sizes)]
+            out_rows.append(row)
             i = j
             continue
 
@@ -478,7 +491,7 @@ def _parse_total_order_from_text(txt: str) -> Optional[Dict[str, Any]]:
     if not out_rows:
         return None
     return {
-        "headers": ["COLOUR", "XS", "S", "M", "L", "XL", "Total"],
+        "headers": ["COLOUR", *header_sizes, "Total"],
         "rows": out_rows,
         "table_kind": "total_order_grid",
         "include_headers_in_rows_matrix": True,

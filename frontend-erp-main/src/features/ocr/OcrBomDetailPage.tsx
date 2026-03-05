@@ -60,6 +60,14 @@ export function OcrBomDetailPage() {
 
   const currentBomMasterId = getAttachedBomMasterId((data as any)?.draft) ?? getAttachedBomMasterId(draft);
 
+  const styleCode = useMemo(() => {
+    const rows = ((draft as any)?.headerRows || (data as any)?.draft?.headerRows) as any[] | undefined;
+    if (!Array.isArray(rows)) return '';
+    const hit = rows.find((r) => String(r?.field || '').trim().toLowerCase() === 'style code');
+    const v = hit?.value;
+    return v === null || v === undefined ? '' : String(v);
+  }, [draft, data]);
+
   const initialDraft = useMemo(() => {
     const d = data?.draft;
     if (!d || typeof d !== 'object') return null;
@@ -147,6 +155,7 @@ export function OcrBomDetailPage() {
           </div>
           <h1 className='text-2xl font-bold text-gray-900'>BoM Master from OCR</h1>
           <div className='text-sm text-gray-600'>Status: {status}</div>
+          <div className='text-sm text-gray-600'>Style Code: {styleCode || '-'}</div>
         </div>
         <div className='flex items-center gap-2'>
           {saveStatus.state === 'error' && <div className='text-sm text-red-600'>{saveStatus.message}</div>}

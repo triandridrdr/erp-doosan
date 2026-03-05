@@ -5,8 +5,18 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '../../components/ui/Button';
 import { ocrDraftApi } from './api';
 import { getAttachedBomMasterId } from './draftHelpers';
+import { styleApi } from '../style/api';
 
 type HeaderRow = { field: string; value: string; editable?: boolean };
+
+type StyleListItem = {
+  id: number;
+  productId?: string;
+  styleCode: string;
+  styleName: string;
+  season?: string;
+  description?: string;
+};
 
 type SizeRow = {
   id: string;
@@ -68,6 +78,9 @@ export function OcrSalesOrderDetailPage() {
   const [saveStatus, setSaveStatus] = useState<{ state: 'idle' | 'saving' | 'saved' | 'error'; message?: string }>({
     state: 'idle',
   });
+
+  const [styleCodeSearch, setStyleCodeSearch] = useState('');
+  const [isStyleCodeOpen, setIsStyleCodeOpen] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['ocr-draft', id],
@@ -145,6 +158,15 @@ export function OcrSalesOrderDetailPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['ocr-drafts'] });
       qc.invalidateQueries({ queryKey: ['ocr-draft', id] });
+    },
+  });
+
+  const styleCodeQuery = useQuery({
+    queryKey: ['styles-autocomplete', 'ocr-sales-order', styleCodeSearch],
+    enabled: isStyleCodeOpen && !!styleCodeSearch.trim(),
+    queryFn: async () => {
+      const res = await styleApi.list({ page: 0, size: 10, search: styleCodeSearch.trim() ? styleCodeSearch.trim() : undefined });
+      return ((res as any)?.data?.content as StyleListItem[]) || [];
     },
   });
 
@@ -237,19 +259,96 @@ export function OcrSalesOrderDetailPage() {
                 <tr key={r.field}>
                   <td className='px-4 py-2 text-sm text-gray-700 whitespace-nowrap'>{r.field}</td>
                   <td className='px-4 py-2 text-sm text-gray-900'>
-                    <input
-                      className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
-                      value={r.value}
-                      onChange={(e) => {
-                        setDraft((cur) => {
-                          if (!cur) return cur;
-                          return {
-                            ...cur,
-                            headerRows: cur.headerRows.map((x) => (x.field === r.field ? { ...x, value: e.target.value } : x)),
-                          };
-                        });
-                      }}
-                    />
+                    {String(r.field || '').trim().toLowerCase() === 'style code' ? (
+                      <div className='relative'>
+                        <input
+                          className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
+                          value={r.value}
+                          onFocus={() => {
+                            setIsStyleCodeOpen(true);
+                            setStyleCodeSearch(String(r.value || ''));
+                          }}
+                          onBlur={() => {
+                            window.setTimeout(() => setIsStyleCodeOpen(false), 150);
+                          }}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setStyleCodeSearch(v);
+                            setDraft((cur) => {
+                              if (!cur) return cur;
+                              return {
+                                ...cur,
+                                headerRows: cur.headerRows.map((x) => (x.field === r.field ? { ...x, value: v } : x)),
+                              };
+                            });
+                          }}
+                        />
+
+                        {isStyleCodeOpen && styleCodeSearch.trim() && (
+                          <div className='absolute z-50 mt-1 w-full bg-white border border-gray-200 rounded shadow-sm max-h-64 overflow-auto'>
+                            {styleCodeQuery.isFetching && (
+                              <div className='px-3 py-2 text-sm text-gray-500'>Searching...</div>
+                            )}
+                            {!styleCodeQuery.isFetching && (styleCodeQuery.data || []).length === 0 && (
+                              <div className='px-3 py-2 text-sm text-gray-500'>No results.</div>
+                            )}
+                            {(styleCodeQuery.data || []).map((s) => (
+                              <button
+                                type='button'
+                                key={s.id}
+                                className='w-full text-left px-3 py-2 text-sm hover:bg-gray-50'
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  if (!draft) return;
+
+                                  const nextDraft: DraftEditorPayload = {
+                                    ...draft,
+                                    system: {
+                                      ...(draft.system || {}),
+                                      styleId: s.id,
+                                    },
+                                    headerRows: draft.headerRows.map((x) =>
+                                      String(x.field || '').trim().toLowerCase() === 'style code'
+                                        ? { ...x, value: (s.styleCode || '').trim() }
+                                        : x
+                                    ),
+                                  };
+
+                                  setDraft(nextDraft);
+                                  setStyleCodeSearch((s.styleCode || '').trim());
+                                  setIsStyleCodeOpen(false);
+
+                                  const headerMap = new Map(nextDraft.headerRows.map((rr) => [rr.field, rr.value] as const));
+                                  const soNumber = headerMap.get('SO Number') || data?.soNumber || '';
+                                  saveDraft({
+                                    sourceFilename: data?.sourceFilename,
+                                    soNumber,
+                                    draft: nextDraft,
+                                  });
+                                }}
+                              >
+                                <div className='font-medium text-gray-900'>{s.styleCode}</div>
+                                <div className='text-xs text-gray-500'>ID: {s.id}{s.styleName ? ` · ${s.styleName}` : ''}</div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <input
+                        className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
+                        value={r.value}
+                        onChange={(e) => {
+                          setDraft((cur) => {
+                            if (!cur) return cur;
+                            return {
+                              ...cur,
+                              headerRows: cur.headerRows.map((x) => (x.field === r.field ? { ...x, value: e.target.value } : x)),
+                            };
+                          });
+                        }}
+                      />
+                    )}
                   </td>
                 </tr>
               ))}

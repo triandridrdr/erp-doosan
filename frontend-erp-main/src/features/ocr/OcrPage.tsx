@@ -418,12 +418,24 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   const [isAttachOpen, setIsAttachOpen] = useState(false);
   const [attachStyleSearch, setAttachStyleSearch] = useState('');
 
+  const [styleCodeSearch, setStyleCodeSearch] = useState('');
+  const [isStyleCodeOpen, setIsStyleCodeOpen] = useState(false);
+
   const styleSearchQuery = useQuery({
     queryKey: ['styles', attachStyleSearch],
     enabled: false,
     queryFn: async () => {
       const res = await styleApi.list({ page: 0, size: 20, search: attachStyleSearch.trim() ? attachStyleSearch.trim() : undefined });
       return (res as any)?.data?.content as StyleListItem[];
+    },
+  });
+
+  const styleCodeQuery = useQuery({
+    queryKey: ['styles-autocomplete', styleCodeSearch],
+    enabled: isStyleCodeOpen && !!styleCodeSearch.trim(),
+    queryFn: async () => {
+      const res = await styleApi.list({ page: 0, size: 10, search: styleCodeSearch.trim() ? styleCodeSearch.trim() : undefined });
+      return ((res as any)?.data?.content as StyleListItem[]) || [];
     },
   });
 
@@ -511,9 +523,14 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
       setSaveStatus({ state: 'saving' });
     },
     onSuccess: (res: any) => {
-      const id = res?.id;
-      if (typeof id === 'number') setSaveStatus({ state: 'saved', id });
-      else setSaveStatus({ state: 'saved' });
+      const id = res?.data?.id ?? res?.data?.data?.id ?? res?.id ?? res?.data;
+      if (typeof id === 'number') {
+        setSaveStatus({ state: 'saved', id });
+        window.alert(`SO id ${id} saved`);
+      } else {
+        setSaveStatus({ state: 'saved' });
+        window.alert('SO saved');
+      }
     },
     onError: (err: any) => {
       const msg = err?.response?.data?.message || err?.message || 'Save failed';
@@ -994,21 +1011,113 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                       <tr key={r.field}>
                                         <td className='px-4 py-2 text-sm text-gray-700 whitespace-nowrap'>{r.field}</td>
                                         <td className='px-4 py-2 text-sm text-gray-900'>
-                                          <input
-                                            className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
-                                            value={r.value}
-                                            onChange={(e) => {
-                                              setErpDraft((cur) => {
-                                                if (!cur) return cur;
-                                                return {
-                                                  ...cur,
-                                                  headerRows: cur.headerRows.map((x) =>
-                                                    x.field === r.field ? { ...x, value: e.target.value } : x
-                                                  ),
-                                                };
-                                              });
-                                            }}
-                                          />
+                                          {String(r.field || '').trim().toLowerCase() === 'style code' ? (
+                                            <div className='relative'>
+                                              <input
+                                                className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
+                                                value={r.value}
+                                                onFocus={() => {
+                                                  setIsStyleCodeOpen(true);
+                                                  setStyleCodeSearch(String(r.value || ''));
+                                                }}
+                                                onBlur={() => {
+                                                  window.setTimeout(() => setIsStyleCodeOpen(false), 150);
+                                                }}
+                                                onChange={(e) => {
+                                                  const v = e.target.value;
+                                                  setStyleCodeSearch(v);
+                                                  setErpDraft((cur) => {
+                                                    if (!cur) return cur;
+                                                    return {
+                                                      ...cur,
+                                                      headerRows: cur.headerRows.map((x) =>
+                                                        x.field === r.field ? { ...x, value: v } : x
+                                                      ),
+                                                    };
+                                                  });
+                                                }}
+                                              />
+
+                                              {isStyleCodeOpen && styleCodeSearch.trim() && (
+                                                <div className='absolute z-50 mt-1 w-full bg-white border border-gray-200 rounded shadow-sm max-h-64 overflow-auto'>
+                                                  {styleCodeQuery.isFetching && (
+                                                    <div className='px-3 py-2 text-sm text-gray-500'>Searching...</div>
+                                                  )}
+                                                  {!styleCodeQuery.isFetching && (styleCodeQuery.data || []).length === 0 && (
+                                                    <div className='px-3 py-2 text-sm text-gray-500'>No results.</div>
+                                                  )}
+                                                  {(styleCodeQuery.data || []).map((s) => (
+                                                    <button
+                                                      type='button'
+                                                      key={s.id}
+                                                      className='w-full text-left px-3 py-2 text-sm hover:bg-gray-50'
+                                                      onMouseDown={(e) => {
+                                                        e.preventDefault();
+                                                        setErpDraft((cur) => {
+                                                          if (!cur) return cur;
+                                                          const next: ErpDraft = {
+                                                            ...cur,
+                                                            system: {
+                                                              ...cur.system,
+                                                              styleId: s.id,
+                                                            },
+                                                            headerRows: cur.headerRows.map((x) =>
+                                                              String(x.field || '').trim().toLowerCase() === 'style code'
+                                                                ? { ...x, value: (s.styleCode || '').trim() }
+                                                                : x
+                                                            ),
+                                                          };
+
+                                                          const draftId = saveStatus.id;
+                                                          if (typeof draftId === 'number') {
+                                                            void (async () => {
+                                                              try {
+                                                                const headerMap = new Map(next.headerRows.map((r) => [r.field, r.value] as const));
+                                                                const soNumber = headerMap.get('SO Number') || '';
+                                                                const payload = buildDraftPayloadForSave(next);
+                                                                await ocrDraftApi.update(draftId, {
+                                                                  sourceFilename: selectedFile?.name,
+                                                                  soNumber,
+                                                                  draft: payload,
+                                                                });
+                                                                setSaveStatus({ state: 'saved', id: draftId });
+                                                              } catch (err: any) {
+                                                                const msg = err?.response?.data?.message || err?.message || 'Save failed';
+                                                                setSaveStatus({ state: 'error', message: String(msg), id: draftId });
+                                                              }
+                                                            })();
+                                                          }
+
+                                                          return next;
+                                                        });
+                                                        setStyleCodeSearch((s.styleCode || '').trim());
+                                                        setIsStyleCodeOpen(false);
+                                                      }}
+                                                    >
+                                                      <div className='font-medium text-gray-900'>{s.styleCode}</div>
+                                                      <div className='text-xs text-gray-500'>ID: {s.id}{s.styleName ? ` · ${s.styleName}` : ''}</div>
+                                                    </button>
+                                                  ))}
+                                                </div>
+                                              )}
+                                            </div>
+                                          ) : (
+                                            <input
+                                              className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
+                                              value={r.value}
+                                              onChange={(e) => {
+                                                setErpDraft((cur) => {
+                                                  if (!cur) return cur;
+                                                  return {
+                                                    ...cur,
+                                                    headerRows: cur.headerRows.map((x) =>
+                                                      x.field === r.field ? { ...x, value: e.target.value } : x
+                                                    ),
+                                                  };
+                                                });
+                                              }}
+                                            />
+                                          )}
                                         </td>
                                         <td className='px-4 py-2 text-sm text-gray-700'>{r.editable ? 'TRUE' : 'FALSE'}</td>
                                       </tr>
