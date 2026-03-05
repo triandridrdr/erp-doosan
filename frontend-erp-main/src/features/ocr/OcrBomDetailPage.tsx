@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import { Button } from '../../components/ui/Button';
 import { ocrDraftApi } from './api';
+import { getAttachedBomMasterId } from './draftHelpers';
 
 type BomRow = {
   id: string;
@@ -57,7 +58,7 @@ export function OcrBomDetailPage() {
 
   const status = (data?.status as string) || 'DRAFT';
 
-  const currentBomMasterId = (data as any)?.draft?.system?.bomMasterId ?? (draft as any)?.system?.bomMasterId;
+  const currentBomMasterId = getAttachedBomMasterId((data as any)?.draft) ?? getAttachedBomMasterId(draft);
 
   const initialDraft = useMemo(() => {
     const d = data?.draft;
@@ -141,12 +142,11 @@ export function OcrBomDetailPage() {
     <div className='space-y-6'>
       <div className='flex items-center justify-between'>
         <div className='space-y-1'>
-          <div className='text-sm text-gray-500'>OCR Draft ID: {id}</div>
+          <div className='text-sm text-gray-500'>
+            {currentBomMasterId !== undefined ? `Attached BoM Master ID: ${currentBomMasterId}` : `OCR Draft ID: ${id}`}
+          </div>
           <h1 className='text-2xl font-bold text-gray-900'>BoM Master from OCR</h1>
           <div className='text-sm text-gray-600'>Status: {status}</div>
-          {currentBomMasterId !== undefined && currentBomMasterId !== null && String(currentBomMasterId).trim() !== '' && (
-            <div className='text-sm text-gray-600'>Attached BoM Master ID: {String(currentBomMasterId)}</div>
-          )}
         </div>
         <div className='flex items-center gap-2'>
           {saveStatus.state === 'error' && <div className='text-sm text-red-600'>{saveStatus.message}</div>}

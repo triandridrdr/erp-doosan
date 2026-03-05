@@ -21,7 +21,8 @@ export function OcrSalesOrdersPage() {
     queryKey: ['ocr-drafts'],
     queryFn: async () => {
       const res = await ocrDraftApi.list();
-      return res?.data as DraftListItem[];
+      const out = (res?.data as DraftListItem[]) || [];
+      return out.filter((x) => (x.status || '').toUpperCase() !== 'DELETED');
     },
   });
 
@@ -37,6 +38,8 @@ export function OcrSalesOrdersPage() {
       case 'APPROVED':
         return 'bg-green-100 text-green-800';
       case 'DRAFT':
+      case 'DELETED':
+        return 'bg-gray-100 text-gray-800';
         return 'bg-yellow-100 text-yellow-800';
       default:
         return 'bg-gray-100 text-gray-800';

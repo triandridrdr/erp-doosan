@@ -19,7 +19,8 @@ public class OcrSalesOrderDraft extends BaseEntity {
 
     public enum DraftStatus {
         DRAFT,
-        APPROVED
+        APPROVED,
+        DELETED
     }
 
     @Column(name = "source_filename", length = 255)

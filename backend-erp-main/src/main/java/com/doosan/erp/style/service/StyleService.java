@@ -3,8 +3,6 @@ package com.doosan.erp.style.service;
 import com.doosan.erp.common.constant.ErrorCode;
 import com.doosan.erp.common.dto.PageResponse;
 import com.doosan.erp.common.exception.ResourceNotFoundException;
-import com.doosan.erp.bom.dto.BomMasterLineResponse;
-import com.doosan.erp.bom.repository.BomMasterLineRepository;
 import com.doosan.erp.style.dto.StyleRequest;
 import com.doosan.erp.style.dto.StyleResponse;
 import com.doosan.erp.style.entity.Style;
@@ -17,7 +15,6 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -28,7 +25,6 @@ import java.util.stream.Collectors;
 public class StyleService {
 
     private final StyleRepository styleRepository;
-    private final BomMasterLineRepository bomMasterLineRepository;
 
     @Transactional
     public StyleResponse create(StyleRequest request) {
@@ -40,23 +36,9 @@ public class StyleService {
         style.setStyleName(request.getStyleName());
         style.setSeason(request.getSeason());
         style.setDescription(request.getDescription());
-        style.setDefaultBomMasterId(request.getDefaultBomMasterId());
 
         Style saved = styleRepository.save(style);
         return StyleResponse.from(saved);
-    }
-
-    public List<BomMasterLineResponse> getDefaultBomLines(Long styleId) {
-        Style style = styleRepository.findById(styleId)
-                .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.RESOURCE_NOT_FOUND, "Style not found"));
-
-        Long bomMasterId = style.getDefaultBomMasterId();
-        if (bomMasterId == null) return Collections.emptyList();
-
-        return bomMasterLineRepository.findByBomMasterIdOrderByLineNoAsc(bomMasterId)
-                .stream()
-                .map(BomMasterLineResponse::from)
-                .collect(Collectors.toList());
     }
 
     public StyleResponse getOne(Long id) {
@@ -86,7 +68,6 @@ public class StyleService {
         style.setStyleName(request.getStyleName());
         style.setSeason(request.getSeason());
         style.setDescription(request.getDescription());
-        style.setDefaultBomMasterId(request.getDefaultBomMasterId());
 
         Style saved = styleRepository.save(style);
         return StyleResponse.from(saved);

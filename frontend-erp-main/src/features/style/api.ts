@@ -18,7 +18,6 @@ export interface Style {
   styleName: string;
   season?: string;
   description?: string;
-  defaultBomMasterId?: number;
 }
 
 export interface StyleRequest {
@@ -27,18 +26,7 @@ export interface StyleRequest {
   styleName: string;
   season?: string;
   description?: string;
-  defaultBomMasterId?: number;
 }
-
-export type BomLine = {
-  lineNo: number;
-  component?: string;
-  category?: string;
-  composition?: string;
-  uom?: string;
-  consumptionPerUnit?: string;
-  wastePercent?: string;
-};
 
 export const styleApi = {
   list: async (params?: { page?: number; size?: number; search?: string }) => {
@@ -53,10 +41,6 @@ export const styleApi = {
   },
   getOne: async (id: number) => {
     const response = await client.get<ApiResponse<Style>>(`/api/v1/styles/${id}`);
-    return response.data;
-  },
-  getDefaultBomLines: async (id: number) => {
-    const response = await client.get<ApiResponse<BomLine[]>>(`/api/v1/styles/${id}/default-bom-lines`);
     return response.data;
   },
   create: async (data: StyleRequest) => {

@@ -21,6 +21,4 @@ public class StyleRequest {
     private String season;
 
     private String description;
-
-    private Long defaultBomMasterId;
 }

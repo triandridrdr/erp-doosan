@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import { Button } from '../../components/ui/Button';
 import { ocrDraftApi } from './api';
+import { getAttachedBomMasterId } from './draftHelpers';
 
 type HeaderRow = { field: string; value: string; editable?: boolean };
 
@@ -119,6 +120,8 @@ export function OcrSalesOrderDetailPage() {
 
   const [draft, setDraft] = useState<DraftEditorPayload | null>(null);
 
+  const attachedBomMasterId = getAttachedBomMasterId((data as any)?.draft) ?? getAttachedBomMasterId(draft);
+
   if (draft === null && initialDraft !== null) {
     setDraft(initialDraft);
   }
@@ -187,7 +190,9 @@ export function OcrSalesOrderDetailPage() {
     <div className='space-y-6'>
       <div className='flex items-center justify-between'>
         <div className='space-y-1'>
-          <div className='text-sm text-gray-500'>OCR Draft ID: {id}</div>
+          <div className='text-sm text-gray-500'>
+            {attachedBomMasterId !== undefined ? `Attached BoM Master ID: ${attachedBomMasterId}` : `OCR Draft ID: ${id}`}
+          </div>
           <h1 className='text-2xl font-bold text-gray-900'>Sales Order from OCR</h1>
           <div className='text-sm text-gray-600'>Status: {status}</div>
         </div>

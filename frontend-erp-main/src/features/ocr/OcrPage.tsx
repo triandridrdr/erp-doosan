@@ -59,7 +59,6 @@ type StyleListItem = {
   styleName: string;
   season?: string;
   description?: string;
-  defaultBomMasterId?: number;
 };
 
 type ErpDraft = {
@@ -433,29 +432,32 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
       if (!erpDraft) throw new Error('Draft not ready');
       const draftId = saveStatus.id;
 
-      const bomLinesRes = await styleApi.getDefaultBomLines(style.id);
-      const bomLines = ((bomLinesRes as any)?.data ?? []) as Array<Record<string, unknown>>;
-      const nextBomRows: ErpBomRow[] = Array.isArray(bomLines)
-        ? bomLines.map((ln) => ({
-            id: newRowId(),
-            component: asString((ln as any).component),
-            category: asString((ln as any).category),
-            composition: asString((ln as any).composition),
-            uom: asString((ln as any).uom),
-            consumptionPerUnit: asString((ln as any).consumptionPerUnit),
-            wastePercent: asString((ln as any).wastePercent),
+      const nextHeaderRows: ErpHeaderRow[] = (() => {
+        const styleCode = (style.styleCode || '').trim();
+        if (!styleCode) return erpDraft.headerRows;
+
+        const exists = erpDraft.headerRows.some((r) => r.field.toLowerCase() === 'style code');
+        if (exists) {
+          return erpDraft.headerRows.map((r) => (r.field.toLowerCase() === 'style code' ? { ...r, value: styleCode } : r));
+        }
+
+        return [
+          ...erpDraft.headerRows,
+          {
+            field: 'Style Code',
+            value: styleCode,
             editable: true,
-          }))
-        : erpDraft.bomRows;
+          },
+        ];
+      })();
 
       const nextErpDraft: ErpDraft = {
         ...erpDraft,
         system: {
           ...erpDraft.system,
           styleId: style.id,
-          bomMasterId: undefined,
         },
-        bomRows: nextBomRows,
+        headerRows: nextHeaderRows,
       };
 
       if (typeof draftId === 'number') {
@@ -908,12 +910,6 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                 </div>
                               )}
 
-                              {typeof (erpDraft as any)?.system?.bomMasterId === 'number' && (
-                                <div className='mt-1 text-xs text-gray-700'>
-                                  Default BoM Master ID: {(erpDraft as any).system.bomMasterId}
-                                </div>
-                              )}
-
                               {isAttachOpen && (
                                 <div className='mt-3 bg-white rounded-lg border border-gray-200 p-4 space-y-3'>
                                   <div className='flex items-center justify-between'>
@@ -946,14 +942,13 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                           <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Style Code</th>
                                           <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Style Name</th>
                                           <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Season</th>
-                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Default BoM ID</th>
                                           <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Actions</th>
                                         </tr>
                                       </thead>
                                       <tbody className='bg-white divide-y divide-gray-100'>
                                         {((styleSearchQuery.data || []) as StyleListItem[]).length === 0 && (
                                           <tr>
-                                            <td colSpan={6} className='px-3 py-4 text-sm text-gray-500'>
+                                            <td colSpan={5} className='px-3 py-4 text-sm text-gray-500'>
                                               No results.
                                             </td>
                                           </tr>
@@ -964,9 +959,6 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                             <td className='px-3 py-2 text-sm text-gray-700'>{s.styleCode}</td>
                                             <td className='px-3 py-2 text-sm text-gray-700'>{s.styleName}</td>
                                             <td className='px-3 py-2 text-sm text-gray-700'>{s.season ?? '-'}</td>
-                                            <td className='px-3 py-2 text-sm text-gray-700'>
-                                              {typeof s.defaultBomMasterId === 'number' ? s.defaultBomMasterId : '-'}
-                                            </td>
                                             <td className='px-3 py-2 text-sm text-gray-700'>
                                               <Button
                                                 className='h-8 px-3 text-sm'
