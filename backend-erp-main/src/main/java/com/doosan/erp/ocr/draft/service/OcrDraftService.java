@@ -5,10 +5,7 @@ import com.doosan.erp.ocr.draft.dto.OcrDraftUpdateRequest;
 import com.doosan.erp.ocr.draft.entity.OcrSalesOrderDraft;
 import com.doosan.erp.ocr.draft.repository.OcrSalesOrderDraftRepository;
 import com.doosan.erp.common.constant.ErrorCode;
-import com.doosan.erp.common.exception.BusinessException;
 import com.doosan.erp.common.exception.ResourceNotFoundException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,7 +17,6 @@ import java.util.List;
 public class OcrDraftService {
 
     private final OcrSalesOrderDraftRepository ocrSalesOrderDraftRepository;
-    private final ObjectMapper objectMapper;
 
     public Long save(OcrDraftSaveRequest request) {
         OcrSalesOrderDraft e = new OcrSalesOrderDraft();
@@ -52,22 +48,6 @@ public class OcrDraftService {
     @Transactional
     public OcrSalesOrderDraft approve(long id) {
         OcrSalesOrderDraft e = getById(id);
-
-        JsonNode root;
-        try {
-            root = objectMapper.readTree(e.getDraftJson());
-        } catch (Exception ex) {
-            throw new BusinessException(ErrorCode.INVALID_INPUT_VALUE, "Draft JSON is invalid");
-        }
-
-        JsonNode bomMasterId = root.path("system").path("bomMasterId");
-        boolean hasBomMasterId = !bomMasterId.isMissingNode()
-                && !bomMasterId.isNull()
-                && !(bomMasterId.isTextual() && bomMasterId.asText().trim().isEmpty());
-
-        if (!hasBomMasterId) {
-            throw new BusinessException(ErrorCode.INVALID_INPUT_VALUE, "BoM master must be attached before approving");
-        }
 
         e.setStatus(OcrSalesOrderDraft.DraftStatus.APPROVED);
         return e;

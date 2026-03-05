@@ -8,7 +8,7 @@ import { AlertCircle, FileText, Loader2, Table as TableIcon, Type, Upload } from
 import { useEffect, useMemo, useState } from 'react';
 
 import { Button } from '../../components/ui/Button';
-import { bomMasterApi, ocrDraftApi, ocrPythonApi } from './api';
+import { ocrDraftApi, ocrPythonApi } from './api';
 import { styleApi } from '../style/api';
 import type {
   DocumentAnalysisResponse,
@@ -60,25 +60,6 @@ type StyleListItem = {
   season?: string;
   description?: string;
   defaultBomMasterId?: number;
-};
-
-type BomMasterLine = {
-  lineNo: number;
-  component?: string;
-  category?: string;
-  composition?: string;
-  uom?: string;
-  consumptionPerUnit?: string;
-  wastePercent?: string;
-};
-
-type BomMasterResponse = {
-  id: number;
-  styleNo: string;
-  article: string;
-  revision?: number;
-  status?: string;
-  lines?: BomMasterLine[];
 };
 
 type ErpDraft = {
@@ -452,32 +433,27 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
       if (!erpDraft) throw new Error('Draft not ready');
       const draftId = saveStatus.id;
 
-      const bomId = style.defaultBomMasterId;
-
-      let nextBomRows: ErpBomRow[] = erpDraft.bomRows;
-      if (typeof bomId === 'number') {
-        const bomRes = await bomMasterApi.get(bomId);
-        const bomMaster: BomMasterResponse | undefined = (bomRes as any)?.data ?? (bomRes as any);
-        const lines: BomMasterLine[] = (((bomMaster as any)?.lines ?? []) as BomMasterLine[]) || [];
-
-        nextBomRows = lines.map((ln) => ({
-          id: newRowId(),
-          component: asString(ln.component),
-          category: asString(ln.category),
-          composition: asString(ln.composition),
-          uom: asString(ln.uom),
-          consumptionPerUnit: asString(ln.consumptionPerUnit),
-          wastePercent: asString(ln.wastePercent),
-          editable: true,
-        }));
-      }
+      const bomLinesRes = await styleApi.getDefaultBomLines(style.id);
+      const bomLines = ((bomLinesRes as any)?.data ?? []) as Array<Record<string, unknown>>;
+      const nextBomRows: ErpBomRow[] = Array.isArray(bomLines)
+        ? bomLines.map((ln) => ({
+            id: newRowId(),
+            component: asString((ln as any).component),
+            category: asString((ln as any).category),
+            composition: asString((ln as any).composition),
+            uom: asString((ln as any).uom),
+            consumptionPerUnit: asString((ln as any).consumptionPerUnit),
+            wastePercent: asString((ln as any).wastePercent),
+            editable: true,
+          }))
+        : erpDraft.bomRows;
 
       const nextErpDraft: ErpDraft = {
         ...erpDraft,
         system: {
           ...erpDraft.system,
           styleId: style.id,
-          bomMasterId: typeof bomId === 'number' ? bomId : undefined,
+          bomMasterId: undefined,
         },
         bomRows: nextBomRows,
       };

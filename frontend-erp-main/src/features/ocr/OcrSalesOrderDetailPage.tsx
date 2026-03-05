@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { Button } from '../../components/ui/Button';
-import { bomMasterApi, ocrDraftApi } from './api';
+import { ocrDraftApi } from './api';
 
 type HeaderRow = { field: string; value: string; editable?: boolean };
 
@@ -37,14 +37,6 @@ type DraftEditorPayload = {
   bomRows: BomRow[];
 };
 
-type BomMasterListItem = {
-  id: number;
-  styleNo: string;
-  article: string;
-  revision?: number;
-  status?: string;
-};
-
 const toIntLoose = (v: unknown) => {
   const s0 = v === null || v === undefined ? '' : String(v);
   const s = s0.trim();
@@ -75,10 +67,6 @@ export function OcrSalesOrderDetailPage() {
   const [saveStatus, setSaveStatus] = useState<{ state: 'idle' | 'saving' | 'saved' | 'error'; message?: string }>({
     state: 'idle',
   });
-
-  const [isAttachOpen, setIsAttachOpen] = useState(false);
-  const [attachStyleNo, setAttachStyleNo] = useState('');
-  const [attachArticle, setAttachArticle] = useState('');
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['ocr-draft', id],
@@ -131,9 +119,6 @@ export function OcrSalesOrderDetailPage() {
 
   const [draft, setDraft] = useState<DraftEditorPayload | null>(null);
 
-  const bomMasterId = (draft as any)?.system?.bomMasterId ?? (data as any)?.draft?.system?.bomMasterId;
-  const hasBomMasterId = bomMasterId !== undefined && bomMasterId !== null && String(bomMasterId).trim() !== '';
-
   if (draft === null && initialDraft !== null) {
     setDraft(initialDraft);
   }
@@ -160,47 +145,6 @@ export function OcrSalesOrderDetailPage() {
     },
   });
 
-  const { data: bomSearchData, isFetching: isBomSearching, refetch: refetchBomSearch } = useQuery({
-    queryKey: ['bom-masters', attachStyleNo, attachArticle],
-    enabled: false,
-    queryFn: async () => {
-      const res = await bomMasterApi.search({ styleNo: attachStyleNo, article: attachArticle });
-      return res?.data as BomMasterListItem[];
-    },
-  });
-
-  const { mutate: attachBom, isPending: isAttachPending } = useMutation({
-    mutationFn: async (bomId: number) => {
-      if (!draft) throw new Error('Draft not loaded');
-      const nextDraft = {
-        ...draft,
-        system: {
-          ...(draft as any).system,
-          bomMasterId: bomId,
-        },
-      };
-
-      const headerMap = new Map(draft.headerRows.map((r) => [r.field, r.value] as const));
-      const soNumber = headerMap.get('SO Number') || data?.soNumber || '';
-
-      await ocrDraftApi.update(id, {
-        sourceFilename: data?.sourceFilename,
-        soNumber,
-        draft: nextDraft,
-      });
-
-      setDraft(nextDraft);
-      setIsAttachOpen(false);
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['ocr-drafts'] });
-      qc.invalidateQueries({ queryKey: ['ocr-draft', id] });
-    },
-    onError: (err: any) => {
-      const msg = err?.response?.data?.message || err?.message || 'Attach BoM failed';
-      setSaveStatus({ state: 'error', message: String(msg) });
-    },
-  });
 
   if (!Number.isFinite(id)) {
     return (
@@ -250,9 +194,6 @@ export function OcrSalesOrderDetailPage() {
         <div className='flex items-center gap-2'>
           {saveStatus.state === 'error' && <div className='text-sm text-red-600'>{saveStatus.message}</div>}
           {saveStatus.state === 'saved' && <div className='text-sm text-green-700'>Saved</div>}
-          {!hasBomMasterId && String(status).toUpperCase() !== 'APPROVED' && (
-            <div className='text-sm text-red-600'>Attach BoM master first to approve.</div>
-          )}
           <Button variant='outline' onClick={() => navigate('/ocr-sales-orders')}>
             Back
           </Button>
@@ -260,98 +201,19 @@ export function OcrSalesOrderDetailPage() {
             {isSavePending ? 'Saving...' : 'Save'}
           </Button>
           <Button
-            className='bg-indigo-600 hover:bg-indigo-700'
-            onClick={() => setIsAttachOpen(true)}
-            disabled={isAttachPending}
-          >
-            Attach BoM
-          </Button>
-          <Button
             className='bg-green-600 hover:bg-green-700'
             onClick={() => {
-              if (!hasBomMasterId) return;
               approveDraft();
             }}
             disabled={
               isApprovePending ||
-              String(status).toUpperCase() === 'APPROVED' ||
-              !hasBomMasterId
+              String(status).toUpperCase() === 'APPROVED'
             }
           >
             {String(status).toUpperCase() === 'APPROVED' ? 'Approved' : isApprovePending ? 'Approving...' : 'Approve'}
           </Button>
         </div>
       </div>
-
-      {isAttachOpen && (
-        <div className='bg-white rounded-lg border border-gray-200 p-4 space-y-3'>
-          <div className='flex items-center justify-between'>
-            <div className='font-semibold text-gray-900'>Attach BoM Master</div>
-            <Button variant='outline' onClick={() => setIsAttachOpen(false)}>
-              Close
-            </Button>
-          </div>
-          <div className='grid grid-cols-1 md:grid-cols-3 gap-2 items-end'>
-            <div className='space-y-1'>
-              <div className='text-xs font-medium text-gray-600'>Style No</div>
-              <input
-                className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
-                value={attachStyleNo}
-                onChange={(e) => setAttachStyleNo(e.target.value)}
-              />
-            </div>
-            <div className='space-y-1'>
-              <div className='text-xs font-medium text-gray-600'>Article</div>
-              <input
-                className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
-                value={attachArticle}
-                onChange={(e) => setAttachArticle(e.target.value)}
-              />
-            </div>
-            <Button onClick={() => refetchBomSearch()} disabled={isBomSearching}>
-              {isBomSearching ? 'Searching...' : 'Search'}
-            </Button>
-          </div>
-
-          <div className='overflow-x-auto'>
-            <table className='min-w-full divide-y divide-gray-200'>
-              <thead className='bg-gray-50'>
-                <tr>
-                  <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>ID</th>
-                  <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Style No</th>
-                  <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Article</th>
-                  <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Revision</th>
-                  <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Status</th>
-                  <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Actions</th>
-                </tr>
-              </thead>
-              <tbody className='bg-white divide-y divide-gray-100'>
-                {(bomSearchData || []).length === 0 && (
-                  <tr>
-                    <td colSpan={6} className='px-3 py-4 text-sm text-gray-500'>
-                      No results.
-                    </td>
-                  </tr>
-                )}
-                {(bomSearchData || []).map((b) => (
-                  <tr key={b.id}>
-                    <td className='px-3 py-2 text-sm text-gray-900'>{b.id}</td>
-                    <td className='px-3 py-2 text-sm text-gray-700'>{b.styleNo}</td>
-                    <td className='px-3 py-2 text-sm text-gray-700'>{b.article}</td>
-                    <td className='px-3 py-2 text-sm text-gray-700'>{b.revision ?? '-'}</td>
-                    <td className='px-3 py-2 text-sm text-gray-700'>{b.status ?? '-'}</td>
-                    <td className='px-3 py-2 text-sm text-gray-700'>
-                      <Button className='h-8 px-3 text-sm' onClick={() => attachBom(b.id)} disabled={isAttachPending}>
-                        {isAttachPending ? 'Attaching...' : 'Attach'}
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
 
       <div className='bg-white rounded-lg border border-gray-200 overflow-hidden'>
         <div className='bg-gray-50 px-4 py-3 border-b border-gray-200'>

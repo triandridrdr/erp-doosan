@@ -1,5 +1,6 @@
 package com.doosan.erp.style.controller;
 
+import com.doosan.erp.bom.dto.BomMasterLineResponse;
 import com.doosan.erp.common.dto.ApiResponse;
 import com.doosan.erp.common.dto.PageResponse;
 import com.doosan.erp.style.dto.StyleRequest;
@@ -13,6 +14,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/v1/styles")
@@ -49,6 +52,12 @@ public class StyleController {
     @Operation(summary = "Update style")
     public ResponseEntity<ApiResponse<StyleResponse>> update(@PathVariable("id") Long id, @Valid @RequestBody StyleRequest request) {
         return ResponseEntity.ok(ApiResponse.success(styleService.update(id, request), "Style updated"));
+    }
+
+    @GetMapping("/{id}/default-bom-lines")
+    @Operation(summary = "Get default BoM lines for style")
+    public ResponseEntity<ApiResponse<List<BomMasterLineResponse>>> getDefaultBomLines(@PathVariable("id") Long id) {
+        return ResponseEntity.ok(ApiResponse.success(styleService.getDefaultBomLines(id)));
     }
 
     @DeleteMapping("/{id}")

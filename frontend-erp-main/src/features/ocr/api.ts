@@ -73,35 +73,6 @@ export const ocrDraftApi = {
   },
 };
 
-export const bomMasterApi = {
-  search: async (params: { styleNo?: string; article?: string }) => {
-    const response = await client.get('/api/v1/bom/masters', { params });
-    return response.data;
-  },
-
-  get: async (id: number) => {
-    const response = await client.get(`/api/v1/bom/masters/${id}`);
-    return response.data;
-  },
-
-  create: async (req: {
-    styleNo: string;
-    article: string;
-    lines: Array<{
-      lineNo: number;
-      component?: string;
-      category?: string;
-      composition?: string;
-      uom?: string;
-      consumptionPerUnit?: string;
-      wastePercent?: string;
-    }>;
-  }) => {
-    const response = await client.post('/api/v1/bom/masters', req);
-    return response.data;
-  },
-};
-
 export const ocrPythonApi = {
   extract: async (file: File) => {
     const formData = new FormData();
