@@ -31,7 +31,7 @@ public class StyleController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Get style")
-    public ResponseEntity<ApiResponse<StyleResponse>> getOne(@PathVariable Long id) {
+    public ResponseEntity<ApiResponse<StyleResponse>> getOne(@PathVariable("id") Long id) {
         return ResponseEntity.ok(ApiResponse.success(styleService.getOne(id)));
     }
 
@@ -47,13 +47,13 @@ public class StyleController {
 
     @PutMapping("/{id}")
     @Operation(summary = "Update style")
-    public ResponseEntity<ApiResponse<StyleResponse>> update(@PathVariable Long id, @Valid @RequestBody StyleRequest request) {
+    public ResponseEntity<ApiResponse<StyleResponse>> update(@PathVariable("id") Long id, @Valid @RequestBody StyleRequest request) {
         return ResponseEntity.ok(ApiResponse.success(styleService.update(id, request), "Style updated"));
     }
 
     @DeleteMapping("/{id}")
     @Operation(summary = "Delete style")
-    public ResponseEntity<ApiResponse<Void>> delete(@PathVariable Long id) {
+    public ResponseEntity<ApiResponse<Void>> delete(@PathVariable("id") Long id) {
         styleService.delete(id);
         return ResponseEntity.ok(ApiResponse.success(null, "Style deleted"));
     }

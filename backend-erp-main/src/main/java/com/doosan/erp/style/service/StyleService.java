@@ -36,6 +36,7 @@ public class StyleService {
         style.setStyleName(request.getStyleName());
         style.setSeason(request.getSeason());
         style.setDescription(request.getDescription());
+        style.setDefaultBomMasterId(request.getDefaultBomMasterId());
 
         Style saved = styleRepository.save(style);
         return StyleResponse.from(saved);
@@ -68,6 +69,7 @@ public class StyleService {
         style.setStyleName(request.getStyleName());
         style.setSeason(request.getSeason());
         style.setDescription(request.getDescription());
+        style.setDefaultBomMasterId(request.getDefaultBomMasterId());
 
         Style saved = styleRepository.save(style);
         return StyleResponse.from(saved);

@@ -225,7 +225,7 @@ export function OcrBomDetailPage() {
     return (
       <div className='space-y-4'>
         <div className='text-red-600'>Invalid draft id</div>
-        <Button variant='outline' onClick={() => navigate('/ocr-bom')}>
+        <Button variant='outline' onClick={() => navigate('/ocr-bom-master')}>
           Back
         </Button>
       </div>
@@ -240,7 +240,7 @@ export function OcrBomDetailPage() {
     return (
       <div className='space-y-4'>
         <div className='text-red-600'>Failed to load draft.</div>
-        <Button variant='outline' onClick={() => navigate('/ocr-bom')}>
+        <Button variant='outline' onClick={() => navigate('/ocr-bom-master')}>
           Back
         </Button>
       </div>
@@ -261,7 +261,7 @@ export function OcrBomDetailPage() {
       <div className='flex items-center justify-between'>
         <div className='space-y-1'>
           <div className='text-sm text-gray-500'>OCR Draft ID: {id}</div>
-          <h1 className='text-2xl font-bold text-gray-900'>BoM from OCR</h1>
+          <h1 className='text-2xl font-bold text-gray-900'>BoM Master from OCR</h1>
           <div className='text-sm text-gray-600'>Status: {status}</div>
           {currentBomMasterId !== undefined && currentBomMasterId !== null && String(currentBomMasterId).trim() !== '' && (
             <div className='text-sm text-gray-600'>Attached BoM Master ID: {String(currentBomMasterId)}</div>
@@ -270,7 +270,7 @@ export function OcrBomDetailPage() {
         <div className='flex items-center gap-2'>
           {saveStatus.state === 'error' && <div className='text-sm text-red-600'>{saveStatus.message}</div>}
           {saveStatus.state === 'saved' && <div className='text-sm text-green-700'>Saved</div>}
-          <Button variant='outline' onClick={() => navigate('/ocr-bom')}>
+          <Button variant='outline' onClick={() => navigate('/ocr-bom-master')}>
             Back
           </Button>
           <Button onClick={onSave} disabled={isSavePending}>

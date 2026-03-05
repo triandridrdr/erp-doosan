@@ -18,6 +18,7 @@ export interface Style {
   styleName: string;
   season?: string;
   description?: string;
+  defaultBomMasterId?: number;
 }
 
 export interface StyleRequest {
@@ -26,6 +27,7 @@ export interface StyleRequest {
   styleName: string;
   season?: string;
   description?: string;
+  defaultBomMasterId?: number;
 }
 
 export const styleApi = {

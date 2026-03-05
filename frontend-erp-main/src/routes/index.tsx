@@ -3,7 +3,7 @@
  * @description 애플리케이션의 라우팅 구성을 정의하는 파일입니다.
  * 페이지별 경로와 접근 권한(보호된 라우트)을 설정합니다.
  */
-import { createBrowserRouter, Navigate, RouterProvider } from 'react-router-dom';
+import { createBrowserRouter, Navigate, RouterProvider, useParams } from 'react-router-dom';
 
 import { MainLayout } from '../components/layout/MainLayout';
 import { JournalEntryListPage } from '../features/accounting/JournalEntryListPage';
@@ -19,6 +19,12 @@ import { OcrSalesOrderDetailPage } from '../features/ocr/OcrSalesOrderDetailPage
 import { OcrSalesOrdersPage } from '../features/ocr/OcrSalesOrdersPage';
 import { SalesOrderListPage } from '../features/sales/SalesOrderListPage';
 import { StyleListPage } from '../features/style/StyleListPage';
+
+function RedirectOcrBomDetail() {
+  const params = useParams();
+  const id = params.id;
+  return <Navigate to={id ? `/ocr-bom-master/${id}` : '/ocr-bom-master'} replace />;
+}
 
 /**
  * 보호된 라우트 (Protected Route) 래퍼 컴포넌트
@@ -158,8 +164,12 @@ const router = createBrowserRouter([
       { path: 'ocr-python', element: <OcrPythonPage /> }, // OCR with Python
       { path: 'ocr-sales-orders', element: <OcrSalesOrdersPage /> },
       { path: 'ocr-sales-orders/:id', element: <OcrSalesOrderDetailPage /> },
-      { path: 'ocr-bom', element: <OcrBomPage /> },
-      { path: 'ocr-bom/:id', element: <OcrBomDetailPage /> },
+      { path: 'ocr-bom-master', element: <OcrBomPage /> },
+      { path: 'ocr-bom-master/:id', element: <OcrBomDetailPage /> },
+
+      // Backwards-compatible redirects
+      { path: 'ocr-bom', element: <Navigate to='/ocr-bom-master' replace /> },
+      { path: 'ocr-bom/:id', element: <RedirectOcrBomDetail /> },
     ],
   },
   {

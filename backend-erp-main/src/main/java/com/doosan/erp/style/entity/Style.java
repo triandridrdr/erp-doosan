@@ -36,4 +36,7 @@ public class Style {
 
     @Column(name = "description", length = 1000)
     private String description;
+
+    @Column(name = "default_bom_master_id")
+    private Long defaultBomMasterId;
 }

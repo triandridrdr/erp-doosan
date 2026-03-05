@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { Button } from '../../components/ui/Button';
 import { bomMasterApi, ocrDraftApi, ocrPythonApi } from './api';
+import { styleApi } from '../style/api';
 import type {
   DocumentAnalysisResponse,
   DocumentAnalysisResponseData,
@@ -48,14 +49,17 @@ type ErpSystemStatus = {
   source: 'OCR JSON';
   warnings: string[];
   bomMasterId?: number;
+  styleId?: number;
 };
 
-type BomMasterListItem = {
+type StyleListItem = {
   id: number;
-  styleNo: string;
-  article: string;
-  revision?: number;
-  status?: string;
+  productId?: string;
+  styleCode: string;
+  styleName: string;
+  season?: string;
+  description?: string;
+  defaultBomMasterId?: number;
 };
 
 type BomMasterLine = {
@@ -432,43 +436,48 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   });
 
   const [isAttachOpen, setIsAttachOpen] = useState(false);
-  const [attachStyleNo, setAttachStyleNo] = useState('');
-  const [attachArticle, setAttachArticle] = useState('');
+  const [attachStyleSearch, setAttachStyleSearch] = useState('');
 
-  const bomSearchQuery = useQuery({
-    queryKey: ['bom-masters', attachStyleNo, attachArticle],
+  const styleSearchQuery = useQuery({
+    queryKey: ['styles', attachStyleSearch],
     enabled: false,
     queryFn: async () => {
-      const res = await bomMasterApi.search({ styleNo: attachStyleNo, article: attachArticle });
-      return res?.data as BomMasterListItem[];
+      const res = await styleApi.list({ page: 0, size: 20, search: attachStyleSearch.trim() ? attachStyleSearch.trim() : undefined });
+      return (res as any)?.data?.content as StyleListItem[];
     },
   });
 
-  const attachBomMasterMutation = useMutation({
-    mutationFn: async (bomId: number) => {
+  const attachStyleMutation = useMutation({
+    mutationFn: async (style: StyleListItem) => {
       if (!erpDraft) throw new Error('Draft not ready');
       const draftId = saveStatus.id;
 
-      const bomRes = await bomMasterApi.get(bomId);
-      const bomMaster: BomMasterResponse | undefined = (bomRes as any)?.data ?? (bomRes as any);
-      const lines: BomMasterLine[] = (((bomMaster as any)?.lines ?? []) as BomMasterLine[]) || [];
+      const bomId = style.defaultBomMasterId;
 
-      const nextBomRows: ErpBomRow[] = lines.map((ln) => ({
-        id: newRowId(),
-        component: asString(ln.component),
-        category: asString(ln.category),
-        composition: asString(ln.composition),
-        uom: asString(ln.uom),
-        consumptionPerUnit: asString(ln.consumptionPerUnit),
-        wastePercent: asString(ln.wastePercent),
-        editable: true,
-      }));
+      let nextBomRows: ErpBomRow[] = erpDraft.bomRows;
+      if (typeof bomId === 'number') {
+        const bomRes = await bomMasterApi.get(bomId);
+        const bomMaster: BomMasterResponse | undefined = (bomRes as any)?.data ?? (bomRes as any);
+        const lines: BomMasterLine[] = (((bomMaster as any)?.lines ?? []) as BomMasterLine[]) || [];
+
+        nextBomRows = lines.map((ln) => ({
+          id: newRowId(),
+          component: asString(ln.component),
+          category: asString(ln.category),
+          composition: asString(ln.composition),
+          uom: asString(ln.uom),
+          consumptionPerUnit: asString(ln.consumptionPerUnit),
+          wastePercent: asString(ln.wastePercent),
+          editable: true,
+        }));
+      }
 
       const nextErpDraft: ErpDraft = {
         ...erpDraft,
         system: {
           ...erpDraft.system,
-          bomMasterId: bomId,
+          styleId: style.id,
+          bomMasterId: typeof bomId === 'number' ? bomId : undefined,
         },
         bomRows: nextBomRows,
       };
@@ -489,7 +498,7 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
       setIsAttachOpen(false);
     },
     onError: (err: any) => {
-      const msg = err?.response?.data?.message || err?.message || 'Attach BoM failed';
+      const msg = err?.response?.data?.message || err?.message || 'Attach Style failed';
       setSaveStatus({ state: 'error', message: String(msg), id: saveStatus.id });
     },
   });
@@ -911,48 +920,45 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                       disabled={!erpDraft}
                                       onClick={() => setIsAttachOpen((v) => !v)}
                                     >
-                                      Attach BoM Master
+                                      Attach Style
                                     </Button>
                                   </div>
                                 </div>
                               </div>
 
-                              {typeof (erpDraft as any)?.system?.bomMasterId === 'number' && (
+                              {typeof (erpDraft as any)?.system?.styleId === 'number' && (
                                 <div className='mt-3 text-xs text-gray-700'>
-                                  Attached BoM Master ID: {(erpDraft as any).system.bomMasterId}
+                                  Attached Style ID: {(erpDraft as any).system.styleId}
+                                </div>
+                              )}
+
+                              {typeof (erpDraft as any)?.system?.bomMasterId === 'number' && (
+                                <div className='mt-1 text-xs text-gray-700'>
+                                  Default BoM Master ID: {(erpDraft as any).system.bomMasterId}
                                 </div>
                               )}
 
                               {isAttachOpen && (
                                 <div className='mt-3 bg-white rounded-lg border border-gray-200 p-4 space-y-3'>
                                   <div className='flex items-center justify-between'>
-                                    <div className='font-semibold text-gray-900'>Select BoM Master</div>
+                                    <div className='font-semibold text-gray-900'>Select Style</div>
                                     <Button variant='outline' onClick={() => setIsAttachOpen(false)}>
                                       Close
                                     </Button>
                                   </div>
 
                                   <div className='grid grid-cols-1 md:grid-cols-3 gap-2 items-end'>
-                                    <div className='space-y-1'>
-                                      <div className='text-xs font-medium text-gray-600'>Style No</div>
+                                    <div className='md:col-span-2 space-y-1'>
+                                      <div className='text-xs font-medium text-gray-600'>Search</div>
                                       <input
                                         className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
-                                        value={attachStyleNo}
-                                        onChange={(e) => setAttachStyleNo(e.target.value)}
-                                        placeholder='Style No'
+                                        value={attachStyleSearch}
+                                        onChange={(e) => setAttachStyleSearch(e.target.value)}
+                                        placeholder='Search style code, name, season...'
                                       />
                                     </div>
-                                    <div className='space-y-1'>
-                                      <div className='text-xs font-medium text-gray-600'>Article</div>
-                                      <input
-                                        className='w-full border border-gray-200 rounded px-2 py-1 text-sm'
-                                        value={attachArticle}
-                                        onChange={(e) => setAttachArticle(e.target.value)}
-                                        placeholder='Article'
-                                      />
-                                    </div>
-                                    <Button onClick={() => bomSearchQuery.refetch()} disabled={bomSearchQuery.isFetching}>
-                                      {bomSearchQuery.isFetching ? 'Searching...' : 'Search'}
+                                    <Button onClick={() => styleSearchQuery.refetch()} disabled={styleSearchQuery.isFetching}>
+                                      {styleSearchQuery.isFetching ? 'Searching...' : 'Search'}
                                     </Button>
                                   </div>
 
@@ -961,35 +967,37 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                       <thead className='bg-gray-50'>
                                         <tr>
                                           <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>ID</th>
-                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Style No</th>
-                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Article</th>
-                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Revision</th>
-                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Status</th>
+                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Style Code</th>
+                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Style Name</th>
+                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Season</th>
+                                          <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Default BoM ID</th>
                                           <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Actions</th>
                                         </tr>
                                       </thead>
                                       <tbody className='bg-white divide-y divide-gray-100'>
-                                        {((bomSearchQuery.data || []) as BomMasterListItem[]).length === 0 && (
+                                        {((styleSearchQuery.data || []) as StyleListItem[]).length === 0 && (
                                           <tr>
                                             <td colSpan={6} className='px-3 py-4 text-sm text-gray-500'>
                                               No results.
                                             </td>
                                           </tr>
                                         )}
-                                        {((bomSearchQuery.data || []) as BomMasterListItem[]).map((b) => (
-                                          <tr key={b.id}>
-                                            <td className='px-3 py-2 text-sm text-gray-900'>{b.id}</td>
-                                            <td className='px-3 py-2 text-sm text-gray-700'>{b.styleNo}</td>
-                                            <td className='px-3 py-2 text-sm text-gray-700'>{b.article}</td>
-                                            <td className='px-3 py-2 text-sm text-gray-700'>{b.revision ?? '-'}</td>
-                                            <td className='px-3 py-2 text-sm text-gray-700'>{b.status ?? '-'}</td>
+                                        {((styleSearchQuery.data || []) as StyleListItem[]).map((s) => (
+                                          <tr key={s.id}>
+                                            <td className='px-3 py-2 text-sm text-gray-900'>{s.id}</td>
+                                            <td className='px-3 py-2 text-sm text-gray-700'>{s.styleCode}</td>
+                                            <td className='px-3 py-2 text-sm text-gray-700'>{s.styleName}</td>
+                                            <td className='px-3 py-2 text-sm text-gray-700'>{s.season ?? '-'}</td>
+                                            <td className='px-3 py-2 text-sm text-gray-700'>
+                                              {typeof s.defaultBomMasterId === 'number' ? s.defaultBomMasterId : '-'}
+                                            </td>
                                             <td className='px-3 py-2 text-sm text-gray-700'>
                                               <Button
                                                 className='h-8 px-3 text-sm'
-                                                onClick={() => attachBomMasterMutation.mutate(b.id)}
-                                                disabled={attachBomMasterMutation.isPending}
+                                                onClick={() => attachStyleMutation.mutate(s)}
+                                                disabled={attachStyleMutation.isPending}
                                               >
-                                                {attachBomMasterMutation.isPending ? 'Attaching...' : 'Attach'}
+                                                {attachStyleMutation.isPending ? 'Attaching...' : 'Attach'}
                                               </Button>
                                             </td>
                                           </tr>

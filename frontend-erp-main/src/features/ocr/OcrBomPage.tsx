@@ -38,7 +38,7 @@ export function OcrBomPage() {
   return (
     <div className='space-y-6'>
       <div className='flex items-center justify-between'>
-        <h1 className='text-2xl font-bold text-gray-900'>BoM from OCR</h1>
+        <h1 className='text-2xl font-bold text-gray-900'>BoM Master from OCR</h1>
         <Button variant='outline' onClick={() => refetch()}>
           Refresh
         </Button>
@@ -83,7 +83,7 @@ export function OcrBomPage() {
                 <tr
                   key={d.id}
                   className='hover:bg-gray-50 cursor-pointer transition-colors'
-                  onClick={() => navigate(`/ocr-bom/${d.id}`)}
+                  onClick={() => navigate(`/ocr-bom-master/${d.id}`)}
                 >
                   <td className='px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900'>{d.id}</td>
                   <td className='px-6 py-4 whitespace-nowrap text-sm text-gray-700'>{d.soNumber || '-'}</td>

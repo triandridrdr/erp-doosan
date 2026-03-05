@@ -107,7 +107,7 @@ public class GlobalExceptionHandler {
 
                 return ResponseEntity
                                 .status(HttpStatus.BAD_REQUEST)
-                                .body(ApiResponse.error(errorResponse, "입력값 검증에 실패했습니다"));
+                                .body(ApiResponse.error(errorResponse, "Input validation failed"));
         }
 
         /**
@@ -127,12 +127,12 @@ public class GlobalExceptionHandler {
 
                 // 중복 키 에러인지 확인
                 String message = ex.getMessage();
-                String errorMessage = "데이터 무결성 제약 조건을 위반했습니다";
+                String errorMessage = "Data integrity constraint violated";
 
                 if (message != null && message.contains("duplicate key")) {
-                        errorMessage = "이미 존재하는 데이터입니다. 중복된 값을 확인해주세요";
+                        errorMessage = "Duplicate data. Please check for existing values";
                 } else if (message != null && message.contains("foreign key")) {
-                        errorMessage = "참조되는 데이터가 존재하지 않습니다";
+                        errorMessage = "Referenced data does not exist";
                 }
 
                 ErrorResponse errorResponse = new ErrorResponse(
@@ -167,6 +167,6 @@ public class GlobalExceptionHandler {
 
                 return ResponseEntity
                                 .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                                .body(ApiResponse.error(errorResponse, "서버 내부 오류가 발생했습니다"));
+                                .body(ApiResponse.error(errorResponse, "An internal server error occurred"));
         }
 }

@@ -22,6 +22,9 @@ export function StyleListPage() {
   const [isSuccessOpen, setIsSuccessOpen] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
 
+  const [isErrorOpen, setIsErrorOpen] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Style | null>(null);
 
@@ -56,6 +59,11 @@ export function StyleListPage() {
       setSuccessMessage('Style berhasil disimpan.');
       setIsSuccessOpen(true);
     },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message || err?.message || 'Gagal menyimpan style.';
+      setErrorMessage(String(msg));
+      setIsErrorOpen(true);
+    },
   });
 
   const updateMutation = useMutation({
@@ -68,6 +76,11 @@ export function StyleListPage() {
       setEditing(null);
       setSuccessMessage('Style berhasil disimpan.');
       setIsSuccessOpen(true);
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message || err?.message || 'Gagal menyimpan style.';
+      setErrorMessage(String(msg));
+      setIsErrorOpen(true);
     },
   });
 
@@ -279,6 +292,29 @@ export function StyleListPage() {
               onClick={() => {
                 setIsSuccessOpen(false);
                 setSuccessMessage('');
+              }}
+            >
+              OK
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={isErrorOpen}
+        onClose={() => {
+          setIsErrorOpen(false);
+          setErrorMessage('');
+        }}
+        title='Error'
+      >
+        <div className='space-y-6'>
+          <div className='text-sm text-red-600'>{errorMessage}</div>
+          <div className='flex justify-end gap-2'>
+            <Button
+              onClick={() => {
+                setIsErrorOpen(false);
+                setErrorMessage('');
               }}
             >
               OK

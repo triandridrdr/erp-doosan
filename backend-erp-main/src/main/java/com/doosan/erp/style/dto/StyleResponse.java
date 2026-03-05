@@ -14,6 +14,7 @@ public class StyleResponse {
     private String styleName;
     private String season;
     private String description;
+    private Long defaultBomMasterId;
 
     public static StyleResponse from(Style style) {
         return new StyleResponse(
@@ -22,7 +23,8 @@ public class StyleResponse {
                 style.getStyleCode(),
                 style.getStyleName(),
                 style.getSeason(),
-                style.getDescription()
+                style.getDescription(),
+                style.getDefaultBomMasterId()
         );
     }
 }

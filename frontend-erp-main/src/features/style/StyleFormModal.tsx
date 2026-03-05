@@ -19,6 +19,7 @@ export function StyleFormModal({ isOpen, onClose, initial, isSaving, onSubmit }:
   const [styleName, setStyleName] = useState('');
   const [season, setSeason] = useState('');
   const [description, setDescription] = useState('');
+  const [defaultBomMasterId, setDefaultBomMasterId] = useState('');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -28,6 +29,7 @@ export function StyleFormModal({ isOpen, onClose, initial, isSaving, onSubmit }:
     setStyleName(initial?.styleName ?? '');
     setSeason(initial?.season ?? '');
     setDescription(initial?.description ?? '');
+    setDefaultBomMasterId(initial?.defaultBomMasterId != null ? String(initial.defaultBomMasterId) : '');
   }, [isOpen, initial]);
 
   return (
@@ -42,6 +44,7 @@ export function StyleFormModal({ isOpen, onClose, initial, isSaving, onSubmit }:
             styleName: styleName.trim(),
             season: season.trim() ? season.trim() : undefined,
             description: description.trim() ? description.trim() : undefined,
+            defaultBomMasterId: defaultBomMasterId.trim() ? Number(defaultBomMasterId.trim()) : undefined,
           });
         }}
       >
@@ -72,6 +75,13 @@ export function StyleFormModal({ isOpen, onClose, initial, isSaving, onSubmit }:
           placeholder='Description'
           value={description}
           onChange={(e) => setDescription(e.target.value)}
+        />
+
+        <label className='text-sm font-semibold text-gray-700'>Default BoM Master ID</label>
+        <Input
+          placeholder='Default BoM Master ID'
+          value={defaultBomMasterId}
+          onChange={(e) => setDefaultBomMasterId(e.target.value)}
         />
 
         <div className='flex justify-end gap-2 pt-2'>
