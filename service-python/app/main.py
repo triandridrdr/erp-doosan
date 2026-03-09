@@ -90,6 +90,16 @@ except Exception:  # pragma: no cover
     canon_header_key_fuzzy = None
 
 try:
+    from .document_classifier import classify_document
+except Exception:  # pragma: no cover
+    classify_document = None
+
+try:
+    from .bom_parser import build_bom_payload
+except Exception:  # pragma: no cover
+    build_bom_payload = None
+
+try:
     _so_dbg_tables_boot = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
     if _so_dbg_tables_boot:
         logging.getLogger().setLevel(logging.INFO)
@@ -6255,7 +6265,30 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             "errors": len(errors),
         },
     )
+
+    try:
+        if classify_document is not None:
+            doc_class = classify_document(text="\n".join(combined_texts), filename=filename)
+            if isinstance(doc_class, dict):
+                logger.info(
+                    "document_classified",
+                    extra={
+                        "request_id": request_id,
+                        "doc_filename": filename,
+                        "template": doc_class.get("template"),
+                        "confidence": doc_class.get("confidence"),
+                        "signals": doc_class.get("signals"),
+                    },
+                )
+    except Exception:
+        pass
     sales_order_payload = _build_sales_order_payload(combined_tables)
+    bom_payload = None
+    try:
+        if build_bom_payload is not None:
+            bom_payload = build_bom_payload(tables=combined_tables)
+    except Exception:
+        bom_payload = None
 
     # View mode: return only the minimal JSON payload (hide full text/pages/tables for production use)
     if view in {"json", "payload", "minimal", "view_json"}:
@@ -6272,6 +6305,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             "warnings": warnings,
             "errors": errors,
             "sales_order_payload": sales_order_payload,
+            "bom_payload": bom_payload,
         }
 
     return {
@@ -6294,6 +6328,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         "fields": combined_fields,
         "field_pairs": combined_field_pairs,
         "sales_order_payload": sales_order_payload,
+        "bom_payload": bom_payload,
     }
 
 
@@ -6695,6 +6730,23 @@ async def ocr_extract(
                     "errors": len(errors),
                 },
             )
+    except Exception:
+        pass
+
+    try:
+        if classify_document is not None:
+            doc_class = classify_document(text="\n".join(combined_texts), filename=filename)
+            if isinstance(doc_class, dict):
+                logger.info(
+                    "document_classified",
+                    extra={
+                        "request_id": request_id,
+                        "doc_filename": filename,
+                        "template": doc_class.get("template"),
+                        "confidence": doc_class.get("confidence"),
+                        "signals": doc_class.get("signals"),
+                    },
+                )
     except Exception:
         pass
 
@@ -7160,6 +7212,7 @@ async def ocr_extract(
                 "warnings": warnings,
                 "errors": errors,
                 "sales_order_payload": sales_order_payload,
+                "bom_payload": bom_payload,
             }
         )
 
@@ -7184,5 +7237,6 @@ async def ocr_extract(
             "fields": combined_fields,
             "field_pairs": combined_field_pairs,
             "sales_order_payload": sales_order_payload,
+            "bom_payload": bom_payload,
         }
     )
