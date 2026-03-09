@@ -1,6 +1,11 @@
 import re
 from typing import Dict
 
+try:
+    from rapidfuzz import fuzz
+except Exception:  # pragma: no cover
+    fuzz = None
+
 
 def _norm_key(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (s or "").strip().lower())
@@ -36,6 +41,12 @@ _HEADER_LABEL_TO_CANON: Dict[str, str] = {
     "order": "ordernr",
     "orderid": "ordernr",
     "ordernumber": "ordernr",
+    "purchaseorder": "ordernr",
+    "purchaseordernumber": "ordernr",
+    "purchaseorderid": "ordernr",
+    "purchaseorderno": "ordernr",
+    "ponumber": "ordernr",
+    "poref": "ordernr",
     "no": "ordernr",
     "noso": "ordernr",
     "nosalesorder": "ordernr",
@@ -43,7 +54,6 @@ _HEADER_LABEL_TO_CANON: Dict[str, str] = {
     "salesorderno": "ordernr",
     "salesordernumber": "ordernr",
     "pono": "ordernr",
-    "ponumber": "ordernr",
     "purchaseorderno": "ordernr",
     "purchaseordernumber": "ordernr",
     "po": "ordernr",
@@ -82,6 +92,9 @@ _HEADER_LABEL_TO_CANON: Dict[str, str] = {
     "shiptoaddress": "sendto",
     "shippingaddress": "sendto",
     "deliveryaddress": "sendto",
+    "deliveryto": "sendto",
+    "delivery_to": "sendto",
+    "deliverystation": "sendto",
     "deliver_to": "sendto",
     "deliverto": "sendto",
     "paymentterms": "paymentterms",
@@ -179,4 +192,15 @@ def canon_header_key_fuzzy(label: str) -> str:
                 break
     if best_key and best_d <= 2:
         return _HEADER_LABEL_TO_CANON.get(best_key, "")
+
+    if fuzz is not None:
+        best_score = 0.0
+        best_cand = None
+        for cand in _HEADER_LABEL_TO_CANON.keys():
+            score = float(fuzz.ratio(nk, _norm_key(cand)))
+            if score > best_score:
+                best_score = score
+                best_cand = cand
+        if best_cand is not None and best_score >= 85.0:
+            return _HEADER_LABEL_TO_CANON.get(str(best_cand), "")
     return ""
