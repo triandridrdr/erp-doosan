@@ -100,6 +100,11 @@ except Exception:  # pragma: no cover
     build_bom_payload = None
 
 try:
+    from .layout_kv import extract_header_kv_from_tables
+except Exception:  # pragma: no cover
+    extract_header_kv_from_tables = None
+
+try:
     _so_dbg_tables_boot = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
     if _so_dbg_tables_boot:
         logging.getLogger().setLevel(logging.INFO)
@@ -3100,6 +3105,33 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                         _maybe_set_header(ck, vv)
             except Exception:
                 pass
+    except Exception:
+        pass
+
+    # 1c) Layout-based KV extraction: handle vertical (Label|Value) and horizontal (Header row + Value row)
+    # for mixed-form documents. Only fill missing fields to preserve existing behavior.
+    try:
+        if extract_header_kv_from_tables is not None:
+            kv_pairs = extract_header_kv_from_tables(
+                tables=tables,
+                canon_key=_canon_header_key_fuzzy,
+                norm_key=_norm_key,
+            )
+            for ck, vv in (kv_pairs or []):
+                if not ck:
+                    continue
+                if ck not in _HEADER_CANON_KEYS:
+                    continue
+                vvs = str(vv or "").strip()
+                if not vvs:
+                    continue
+                existing = str(payload["header"].get(ck) or "").strip()
+                if existing:
+                    if ck == "careinstructions" and _looks_like_care_value(existing):
+                        continue
+                    if len(existing) >= len(vvs):
+                        continue
+                _maybe_set_header(ck, vvs)
     except Exception:
         pass
 
