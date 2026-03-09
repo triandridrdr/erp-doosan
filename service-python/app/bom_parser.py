@@ -24,6 +24,35 @@ def _to_number(s: str) -> Optional[float]:
         return None
 
 
+def _norm_uom(u: str) -> str:
+    s = _cell_str(u).upper()
+    if not s:
+        return ""
+    s = re.sub(r"[^A-Z0-9]", "", s)
+    m = {
+        "PCS": "PCS",
+        "PC": "PCS",
+        "EA": "PCS",
+        "EACH": "PCS",
+        "UNIT": "PCS",
+        "M": "M",
+        "MTR": "M",
+        "METER": "M",
+        "METRE": "M",
+        "CM": "CM",
+        "MM": "MM",
+        "YD": "YD",
+        "YARD": "YD",
+        "FT": "FT",
+        "KG": "KG",
+        "G": "G",
+        "SET": "SET",
+        "PACK": "PACK",
+        "ROLL": "ROLL",
+    }
+    return m.get(s, s)
+
+
 def _infer_bom_columns(headers: List[str]) -> Dict[str, int]:
     cols: Dict[str, int] = {}
     norm = [_norm_key(h) for h in headers]
@@ -62,6 +91,43 @@ def _infer_bom_columns(headers: List[str]) -> Dict[str, int]:
         cols["uom"] = int(uom_i)
 
     return cols
+
+
+def _looks_like_header_row(row: List[Any]) -> bool:
+    try:
+        cells = [_cell_str(c) for c in (row or [])]
+        cells = [c for c in cells if c]
+        if len(cells) < 2:
+            return False
+        blob = " ".join(cells).upper()
+        hits = 0
+        for kw in ["MATERIAL", "ITEM", "DESCRIPTION", "DESC", "QTY", "QUANTITY", "UOM", "UNIT", "COLOR", "COLOUR", "SIZE", "CONSUMPTION"]:
+            if re.search(r"\b" + re.escape(kw) + r"\b", blob):
+                hits += 1
+        return hits >= 2
+    except Exception:
+        return False
+
+
+def _is_section_or_total_row(cells: List[str]) -> bool:
+    try:
+        blob = " ".join([c for c in (cells or []) if c]).strip().upper()
+        if not blob:
+            return True
+        if re.fullmatch(r"(BOM|BILL\s+OF\s+MATERIALS)", blob, flags=re.IGNORECASE):
+            return True
+        if re.search(r"\b(TOTAL|SUBTOTAL|GRAND\s+TOTAL)\b", blob, flags=re.IGNORECASE):
+            return True
+        if re.search(r"\b(MAIN\s+FABRIC|SECONDARY\s+FABRIC|EMBELLISHMENT|LINING|INTERLINING|TRIM|TRIMMINGS|ACCESSOR(Y|IES)|LABEL|PACKING|PACKAGING)\b", blob, flags=re.IGNORECASE):
+            # Often a section header, not a line item
+            if len(blob) <= 60 and not re.search(r"\d", blob):
+                return True
+        # Skip rows that are purely column titles repeated
+        if _looks_like_header_row([blob]):
+            return True
+        return False
+    except Exception:
+        return False
 
 
 def _score_bom_table(headers: List[str], rows_matrix: List[List[Any]]) -> int:
@@ -110,17 +176,32 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
     tbl = best[1]
     headers = [str(h or "") for h in (tbl.get("headers") or [])]
     rm = tbl.get("rows_matrix") or []
+    if not isinstance(rm, list):
+        return None
+
+    # If headers are missing/garbled, try to infer headers from the first rows_matrix row
+    if (not headers or all(not str(h or "").strip() for h in headers)) and rm and isinstance(rm[0], list) and _looks_like_header_row(rm[0]):
+        headers = [str(x or "") for x in rm[0]]
+
     cols = _infer_bom_columns(headers)
 
     if "material" not in cols and "description" not in cols:
         return None
 
+    start_idx = 0
+    if rm and isinstance(rm[0], list) and _looks_like_header_row(rm[0]):
+        start_idx = 1
+
     lines: List[Dict[str, Any]] = []
-    for r in rm[1:] if rm and isinstance(rm[0], list) and any(_norm_key(x) in {_norm_key(h) for h in headers} for x in rm[0]) else rm:
+    seen_keys = set()
+    for r in rm[start_idx:]:
         if not isinstance(r, list):
             continue
         cells = [_cell_str(c) for c in r]
         if not any(cells):
+            continue
+
+        if _is_section_or_total_row(cells):
             continue
 
         def get(col: str) -> str:
@@ -134,7 +215,7 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
         material = get("material")
         desc = get("description")
         qty_raw = get("qty")
-        uom = get("uom")
+        uom = _norm_uom(get("uom"))
         color = get("color")
         size = get("size")
 
@@ -152,7 +233,18 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
         }
         line = {k: v for k, v in line.items() if v not in (None, "")}
         if line:
-            lines.append(line)
+            k = (
+                _norm_key(str(line.get("material") or ""))
+                + "|"
+                + _norm_key(str(line.get("description") or ""))
+                + "|"
+                + _norm_key(str(line.get("color") or ""))
+                + "|"
+                + _norm_key(str(line.get("size") or ""))
+            )
+            if k.strip("|") and k not in seen_keys:
+                seen_keys.add(k)
+                lines.append(line)
 
     if not lines:
         return None

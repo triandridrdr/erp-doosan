@@ -6751,6 +6751,12 @@ async def ocr_extract(
         pass
 
     sales_order_payload = _build_sales_order_payload(combined_tables)
+    bom_payload = None
+    try:
+        if build_bom_payload is not None:
+            bom_payload = build_bom_payload(tables=combined_tables)
+    except Exception:
+        bom_payload = None
 
     try:
         if str(os.getenv("DEBUG_SALES_ORDER_TRACE") or "").strip() in {"1", "true", "True", "YES", "yes"}:
