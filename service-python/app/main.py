@@ -63,6 +63,33 @@ if not logger.handlers:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 try:
+    from .logging_utils import get_request_id
+    from .logging_utils import log_json
+except Exception:  # pragma: no cover
+    get_request_id = None
+    log_json = None
+
+try:
+    from .pdf_extractor import try_pdf_digital_fastpath
+except Exception:  # pragma: no cover
+    try_pdf_digital_fastpath = None
+
+try:
+    from .ocr_engine import run_page_ocr
+except Exception:  # pragma: no cover
+    run_page_ocr = None
+
+try:
+    from .preprocess_router import preprocess_for_engine
+except Exception:  # pragma: no cover
+    preprocess_for_engine = None
+
+try:
+    from .field_mapper import canon_header_key_fuzzy
+except Exception:  # pragma: no cover
+    canon_header_key_fuzzy = None
+
+try:
     _so_dbg_tables_boot = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
     if _so_dbg_tables_boot:
         logging.getLogger().setLevel(logging.INFO)
@@ -2629,36 +2656,6 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
     if not isinstance(tables, list):
         return payload
 
-    def _levenshtein(a: str, b: str, max_dist: int = 4) -> int:
-        aa = str(a or "")
-        bb = str(b or "")
-        if aa == bb:
-            return 0
-        if not aa:
-            return len(bb)
-        if not bb:
-            return len(aa)
-        if abs(len(aa) - len(bb)) > max_dist:
-            return max_dist + 1
-        prev = list(range(len(bb) + 1))
-        for i, ca in enumerate(aa, start=1):
-            cur = [i]
-            row_best = max_dist + 1
-            for j, cb in enumerate(bb, start=1):
-                ins = cur[j - 1] + 1
-                dele = prev[j] + 1
-                sub = prev[j - 1] + (0 if ca == cb else 1)
-                v = ins if ins < dele else dele
-                if sub < v:
-                    v = sub
-                cur.append(v)
-                if v < row_best:
-                    row_best = v
-            if row_best > max_dist:
-                return max_dist + 1
-            prev = cur
-        return prev[-1]
-
     _HEADER_CANON_KEYS = {
         "ordernr",
         "date",
@@ -2682,104 +2679,160 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
         "totalorder",
     }
 
-    _HEADER_LABEL_TO_CANON = {
-        "ordernr": "ordernr",
-        "order_nr": "ordernr",
-        "orderno": "ordernr",
-        "order": "ordernr",
-        "orderid": "ordernr",
-        "ordernumber": "ordernr",
-        "no": "ordernr",
-        "noso": "ordernr",
-        "nosalesorder": "ordernr",
-        "salesorder": "ordernr",
-        "salesorderno": "ordernr",
-        "salesordernumber": "ordernr",
-        "pono": "ordernr",
-        "ponumber": "ordernr",
-        "purchaseorderno": "ordernr",
-        "purchaseordernumber": "ordernr",
-        "po": "ordernr",
-        "so": "ordernr",
-        "date": "date",
-        "orderdate": "date",
-        "dateoforder": "date",
-        "issuedate": "date",
-        "issue_date": "date",
-        "documentdate": "date",
-        "docdate": "date",
-        "season": "season",
-        "seasoncode": "season",
-        "seasonname": "season",
-        "buyer": "buyer",
-        "customer": "buyer",
-        "cust": "buyer",
-        "soldto": "buyer",
-        "sold_to": "buyer",
-        "billto": "buyer",
-        "bill_to": "buyer",
-        "purchaser": "purchaser",
-        "purchace": "purchaser",
-        "purchasername": "purchaser",
-        "purchasing": "purchaser",
-        "purchase": "purchaser",
-        "supplier": "supplier",
-        "vendor": "supplier",
-        "seller": "supplier",
-        "factory": "supplier",
-        "sendto": "sendto",
-        "send_to": "sendto",
-        "send": "sendto",
-        "shipto": "sendto",
-        "ship_to": "sendto",
-        "shiptoaddress": "sendto",
-        "shippingaddress": "sendto",
-        "deliveryaddress": "sendto",
-        "deliver_to": "sendto",
-        "deliverto": "sendto",
-        "paymentterms": "paymentterms",
-        "payment_terms": "paymentterms",
-        "termsofpayment": "paymentterms",
-        "terms": "paymentterms",
-        "paymentterm": "paymentterms",
-        "payment_term": "paymentterms",
-        "payterms": "paymentterms",
-        "supplierref": "supplierref",
-        "supplier_ref": "supplierref",
-        "vendorref": "supplierref",
-        "vendor_ref": "supplierref",
-        "reference": "supplierref",
-        "ref": "supplierref",
-        "article": "article",
-        "style": "article",
-        "styleno": "article",
-        "style_no": "article",
-        "item": "article",
-        "itemno": "article",
-        "item_no": "article",
-        "description": "description",
-        "desc": "description",
-        "descripton": "description",
-        "descriplion": "description",
-        "marketoforigin": "marketoforigin",
-        "market_origin": "marketoforigin",
-        "origin": "marketoforigin",
-        "countryoforigin": "marketoforigin",
-        "pvp": "pvp",
-        "compositionsinformation": "compositionsinformation",
-        "compositioninformation": "compositionsinformation",
-        "composition": "compositionsinformation",
-        "careinstructions": "careinstructions",
-        "care": "careinstructions",
-        "hangtaglabel": "hangtaglabel",
-        "mainlabel": "mainlabel",
-        "externalfabric": "externalfabric",
-        "hanging": "hanging",
-        "totalorder": "totalorder",
-        "total": "totalorder",
-    }
-
     def _canon_header_key_fuzzy(label: str) -> str:
+        if canon_header_key_fuzzy is not None:
+            return canon_header_key_fuzzy(label)
+
+        def _levenshtein(a: str, b: str, max_dist: int = 4) -> int:
+            aa = str(a or "")
+            bb = str(b or "")
+            if aa == bb:
+                return 0
+            if not aa:
+                return len(bb)
+            if not bb:
+                return len(aa)
+            if abs(len(aa) - len(bb)) > max_dist:
+                return max_dist + 1
+            prev = list(range(len(bb) + 1))
+            for i, ca in enumerate(aa, start=1):
+                cur = [i]
+                row_best = max_dist + 1
+                for j, cb in enumerate(bb, start=1):
+                    ins = cur[j - 1] + 1
+                    dele = prev[j] + 1
+                    sub = prev[j - 1] + (0 if ca == cb else 1)
+                    v = ins if ins < dele else dele
+                    if sub < v:
+                        v = sub
+                    cur.append(v)
+                    if v < row_best:
+                        row_best = v
+                if row_best > max_dist:
+                    return max_dist + 1
+                prev = cur
+            return prev[-1]
+
+        _HEADER_CANON_KEYS = {
+            "ordernr",
+            "date",
+            "season",
+            "buyer",
+            "purchaser",
+            "supplier",
+            "sendto",
+            "paymentterms",
+            "supplierref",
+            "article",
+            "description",
+            "marketoforigin",
+            "pvp",
+            "compositionsinformation",
+            "careinstructions",
+            "hangtaglabel",
+            "mainlabel",
+            "externalfabric",
+            "hanging",
+            "totalorder",
+        }
+
+        _HEADER_LABEL_TO_CANON = {
+            "ordernr": "ordernr",
+            "order_nr": "ordernr",
+            "orderno": "ordernr",
+            "order": "ordernr",
+            "orderid": "ordernr",
+            "ordernumber": "ordernr",
+            "no": "ordernr",
+            "noso": "ordernr",
+            "nosalesorder": "ordernr",
+            "salesorder": "ordernr",
+            "salesorderno": "ordernr",
+            "salesordernumber": "ordernr",
+            "pono": "ordernr",
+            "ponumber": "ordernr",
+            "purchaseorderno": "ordernr",
+            "purchaseordernumber": "ordernr",
+            "po": "ordernr",
+            "so": "ordernr",
+            "date": "date",
+            "orderdate": "date",
+            "dateoforder": "date",
+            "issuedate": "date",
+            "issue_date": "date",
+            "documentdate": "date",
+            "docdate": "date",
+            "season": "season",
+            "seasoncode": "season",
+            "seasonname": "season",
+            "buyer": "buyer",
+            "customer": "buyer",
+            "cust": "buyer",
+            "soldto": "buyer",
+            "sold_to": "buyer",
+            "billto": "buyer",
+            "bill_to": "buyer",
+            "purchaser": "purchaser",
+            "purchace": "purchaser",
+            "purchasername": "purchaser",
+            "purchasing": "purchaser",
+            "purchase": "purchaser",
+            "supplier": "supplier",
+            "vendor": "supplier",
+            "seller": "supplier",
+            "factory": "supplier",
+            "sendto": "sendto",
+            "send_to": "sendto",
+            "send": "sendto",
+            "shipto": "sendto",
+            "ship_to": "sendto",
+            "shiptoaddress": "sendto",
+            "shippingaddress": "sendto",
+            "deliveryaddress": "sendto",
+            "deliver_to": "sendto",
+            "deliverto": "sendto",
+            "paymentterms": "paymentterms",
+            "payment_terms": "paymentterms",
+            "termsofpayment": "paymentterms",
+            "terms": "paymentterms",
+            "paymentterm": "paymentterms",
+            "payment_term": "paymentterms",
+            "payterms": "paymentterms",
+            "supplierref": "supplierref",
+            "supplier_ref": "supplierref",
+            "vendorref": "supplierref",
+            "vendor_ref": "supplierref",
+            "reference": "supplierref",
+            "ref": "supplierref",
+            "article": "article",
+            "style": "article",
+            "styleno": "article",
+            "style_no": "article",
+            "item": "article",
+            "itemno": "article",
+            "item_no": "article",
+            "description": "description",
+            "desc": "description",
+            "descripton": "description",
+            "descriplion": "description",
+            "marketoforigin": "marketoforigin",
+            "market_origin": "marketoforigin",
+            "origin": "marketoforigin",
+            "countryoforigin": "marketoforigin",
+            "pvp": "pvp",
+            "compositionsinformation": "compositionsinformation",
+            "compositioninformation": "compositionsinformation",
+            "composition": "compositionsinformation",
+            "careinstructions": "careinstructions",
+            "care": "careinstructions",
+            "hangtaglabel": "hangtaglabel",
+            "mainlabel": "mainlabel",
+            "externalfabric": "externalfabric",
+            "hanging": "hanging",
+            "totalorder": "totalorder",
+            "total": "totalorder",
+        }
+
         nk = _norm_key(label)
         if not nk:
             return ""
@@ -2788,7 +2841,6 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
             return direct
         if nk in _HEADER_CANON_KEYS:
             return nk
-        # Fuzzy-match only against known label tokens to reduce false positives.
         best_key = ""
         best_d = 5
         for cand in _HEADER_LABEL_TO_CANON.keys():
@@ -5669,292 +5721,34 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     is_pdf = filename.lower().endswith(".pdf") or _looks_like_pdf_bytes(file_bytes)
 
     if is_pdf:
-        pages_text = _pdf_text_pages(file_bytes)
-        joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
-        page_count = len(pages_text or [])
-        pdf_tables_pages = _pdf_tables_pages_tabula(file_bytes, page_count) if page_count else None
-        has_pdf_tables = any((isinstance(p, list) and len(p) > 0) for p in (pdf_tables_pages or []))
-
-        if so_dbg_tables:
+        if try_pdf_digital_fastpath is not None:
             try:
-                per_page_counts = [len(p or []) if isinstance(p, list) else 0 for p in (pdf_tables_pages or [])]
-                logger.info(
-                    "so_pdf_fastpath_input %s",
-                    json.dumps(
-                        {
-                            "event": "so_pdf_fastpath_input",
-                            "request_id": request_id,
-                            "doc_filename": filename,
-                            "page_count": page_count,
-                            "joined_len": len(joined or ""),
-                            "has_pdf_tables": bool(has_pdf_tables),
-                            "tabula_tables_per_page": per_page_counts,
-                        },
-                        ensure_ascii=False,
-                    ),
+                out_fast = try_pdf_digital_fastpath(
+                    request_id=request_id,
+                    filename=filename,
+                    file_bytes=file_bytes,
+                    so_dbg_tables=so_dbg_tables,
+                    warnings=warnings,
+                    errors=errors,
+                    logger=logger,
+                    log_json=None,
+                    pdf_text_pages=_pdf_text_pages,
+                    pdf_tables_pages_tabula=_pdf_tables_pages_tabula,
+                    postprocess_ocr_text=_postprocess_ocr_text,
+                    extract_fields_smart=_extract_fields_smart,
+                    fields_to_pairs=_fields_to_pairs,
+                    build_ai_kv_table_from_fields=_build_ai_kv_table_from_fields,
+                    table_add_rows_matrix=_table_add_rows_matrix,
+                    filter_tables_for_sales_order=_filter_tables_for_sales_order,
+                    normalize_size_grid_columns=_normalize_size_grid_columns,
+                    dedup_top_level_ai_kv_tables=_dedup_top_level_ai_kv_tables,
+                    build_sales_order_payload=_build_sales_order_payload,
+                    parse_total_order_from_text=_parse_total_order_from_text,
                 )
+                if isinstance(out_fast, dict):
+                    return out_fast
             except Exception:
                 pass
-
-        if so_dbg_tables:
-            try:
-                per_page_counts = [len(p or []) if isinstance(p, list) else 0 for p in (pdf_tables_pages or [])]
-                _payload = {
-                    "event": "so_pdf_fastpath_input",
-                    "request_id": request_id,
-                    "doc_filename": filename,
-                    "page_count": page_count,
-                    "joined_len": len(joined or ""),
-                    "has_pdf_tables": bool(has_pdf_tables),
-                    "tabula_tables_per_page": per_page_counts,
-                }
-                logger.info("so_pdf_fastpath_input %s", json.dumps(_payload, ensure_ascii=False))
-            except Exception:
-                pass
-
-        # Digital-PDF fast path:
-        # - If embedded text exists, we can extract header fields from text.
-        # - If Tabula can extract tables, we can also parse TOTAL ORDER / partial deliveries without OCR.
-        if ((joined and len(joined) >= 50) or has_pdf_tables):
-            t_pdf = time.perf_counter()
-            all_pages: List[Dict[str, Any]] = []
-            combined_texts: List[str] = []
-            for i, t in enumerate(pages_text or [], start=1):
-                pp_text = _postprocess_ocr_text(t or "")
-                page_tables: List[Dict[str, Any]] = []
-                if isinstance(pdf_tables_pages, list) and i - 1 < len(pdf_tables_pages):
-                    for tt in (pdf_tables_pages[i - 1] or []):
-                        if isinstance(tt, dict) and tt.get("headers") and tt.get("rows"):
-                            page_tables.append(tt)
-                pp_fields = _extract_fields_smart(pp_text, page_tables)
-                page_res: Dict[str, Any] = {
-                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
-                    "page": i,
-                    "text": pp_text,
-                    "tables": page_tables,
-                    "fields": pp_fields,
-                    "field_pairs": _fields_to_pairs(pp_fields),
-                    "preprocess": {"enabled": False, "target": "pdf_text"},
-                }
-                try:
-                    page_res["tables"] = [_build_ai_kv_table_from_fields(pp_fields)] + (page_res.get("tables") or [])
-                except Exception:
-                    warnings.append({"page": i, "code": "AI_TABLE_BUILD_FAILED", "message": "Failed to build AI key/value table"})
-                    page_res["tables"] = page_res.get("tables") or []
-                all_pages.append(page_res)
-                if pp_text.strip():
-                    combined_texts.append(pp_text.strip())
-
-            combined_fields: List[Dict[str, Any]] = []
-            for p in all_pages:
-                if p.get("fields"):
-                    combined_fields.append({"page": p.get("page"), **(p.get("fields") or {})})
-
-            combined_field_pairs: List[Dict[str, Any]] = []
-            for p in all_pages:
-                for pair in (p.get("field_pairs") or []):
-                    if isinstance(pair, dict) and pair.get("key") is not None and pair.get("value") is not None:
-                        combined_field_pairs.append({"page": p.get("page"), **pair})
-
-            combined_tables: List[Dict[str, Any]] = []
-            for p in all_pages:
-                for t in (p.get("tables") or []):
-                    tt = {"page": p.get("page"), **t}
-                    try:
-                        tt = _table_add_rows_matrix(tt)
-                        if str(tt.get("table_kind") or "").strip().lower() in {"total_order_grid", "partial_deliveries_grid"}:
-                            try:
-                                _normalize_size_grid_columns(tt)
-                            except Exception as e:
-                                if so_dbg_tables:
-                                    try:
-                                        rows0 = tt.get("rows") or []
-                                        row_keys = list((rows0[0] or {}).keys())[:12] if isinstance(rows0, list) and rows0 and isinstance(rows0[0], dict) else None
-                                        logger.info(
-                                            "so_pdf_fastpath_normalize_failed",
-                                            extra={
-                                                "request_id": request_id,
-                                                "page": tt.get("page"),
-                                                "table_kind": str(tt.get("table_kind") or ""),
-                                                "headers": [str(h or "") for h in (tt.get("headers") or [])[:12]],
-                                                "row0_keys": row_keys,
-                                                "error": str(e),
-                                            },
-                                        )
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
-                    combined_tables.append(tt)
-
-            if so_dbg_tables:
-                try:
-                    debug_tables: List[Dict[str, Any]] = []
-                    for t in combined_tables[:12]:
-                        if not isinstance(t, dict):
-                            continue
-                        headers = t.get("headers") or []
-                        debug_tables.append(
-                            {
-                                "page": t.get("page"),
-                                "table_kind": str(t.get("table_kind") or ""),
-                                "headers": [str(h or "") for h in headers[:12]],
-                                "row_count": len(t.get("rows") or []) if isinstance(t.get("rows"), list) else None,
-                            }
-                        )
-                    _payload = {
-                        "event": "so_pdf_fastpath_tables_pre_filter",
-                        "request_id": request_id,
-                        "table_count": len(combined_tables),
-                        "tables": debug_tables,
-                    }
-                    logger.info("so_pdf_fastpath_tables_pre_filter %s", json.dumps(_payload, ensure_ascii=False))
-                except Exception:
-                    pass
-
-            combined_tables = _filter_tables_for_sales_order(combined_tables)
-            combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
-            combined_tables = _filter_tables_for_sales_order(combined_tables)
-            try:
-                for t in combined_tables:
-                    if not isinstance(t, dict):
-                        continue
-                    if str(t.get("table_kind") or "").strip().lower() in {"total_order_grid", "partial_deliveries_grid"}:
-                        try:
-                            _normalize_size_grid_columns(t)
-                        except Exception as e:
-                            if so_dbg_tables:
-                                try:
-                                    rows0 = t.get("rows") or []
-                                    row_keys = list((rows0[0] or {}).keys())[:12] if isinstance(rows0, list) and rows0 and isinstance(rows0[0], dict) else None
-                                    logger.info(
-                                        "so_pdf_fastpath_normalize_failed %s",
-                                        json.dumps(
-                                            {
-                                                "event": "so_pdf_fastpath_normalize_failed",
-                                                "request_id": request_id,
-                                                "page": t.get("page"),
-                                                "table_kind": str(t.get("table_kind") or ""),
-                                                "headers": [str(h or "") for h in (t.get("headers") or [])[:12]],
-                                                "row0_keys": row_keys,
-                                                "error": str(e),
-                                            },
-                                            ensure_ascii=False,
-                                        ),
-                                    )
-                                except Exception:
-                                    pass
-            except Exception:
-                pass
-            combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
-
-            # Fallback: parse TOTAL ORDER from embedded text when Tabula tables are missing/misclassified.
-            try:
-                payload0 = _build_sales_order_payload(combined_tables)
-                grid0 = ((payload0.get("total_order") or {}).get("grid")) if isinstance(payload0, dict) else None
-                if not (isinstance(grid0, list) and len(grid0) > 0):
-                    parsed = _parse_total_order_from_text("\n".join(combined_texts))
-                    if isinstance(parsed, dict):
-                        unit_lot = parsed.get("unit_lot") if isinstance(parsed.get("unit_lot"), str) else None
-                        if unit_lot is not None:
-                            try:
-                                rows_p = parsed.get("rows")
-                                if isinstance(rows_p, list):
-                                    rows_p.append({"COLOUR": "UNIT LOT", "XS": str(unit_lot)})
-                                    parsed["rows"] = rows_p
-                            except Exception:
-                                pass
-                        combined_tables.append(parsed)
-                        combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
-                        try:
-                            for t in combined_tables:
-                                if isinstance(t, dict) and str(t.get("table_kind") or "").strip().lower() == "total_order_grid":
-                                    _normalize_size_grid_columns(t)
-                        except Exception:
-                            pass
-                        if so_dbg_tables:
-                            try:
-                                _payload = {
-                                    "event": "so_pdf_fastpath_total_order_text_fallback_used",
-                                    "request_id": request_id,
-                                    "row_count": len(parsed.get("rows") or []),
-                                }
-                                logger.info("so_pdf_fastpath_total_order_text_fallback_used %s", json.dumps(_payload, ensure_ascii=False))
-                            except Exception:
-                                pass
-                    elif so_dbg_tables:
-                        try:
-                            snippet = "\n".join((combined_texts or [])[:1])
-                            logger.info(
-                                "so_pdf_fastpath_total_order_text_fallback_none %s",
-                                json.dumps(
-                                    {
-                                        "event": "so_pdf_fastpath_total_order_text_fallback_none",
-                                        "request_id": request_id,
-                                        "note": "_parse_total_order_from_text returned None",
-                                        "text_head": (snippet or "")[:800],
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                            )
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-            if so_dbg_tables:
-                try:
-                    kinds: Dict[str, int] = {}
-                    for t in combined_tables:
-                        if not isinstance(t, dict):
-                            continue
-                        k = str(t.get("table_kind") or "").strip() or "(none)"
-                        kinds[k] = int(kinds.get(k, 0)) + 1
-                    payload_dbg = _build_sales_order_payload(combined_tables)
-                    grid_len = len(((payload_dbg.get("total_order") or {}).get("grid")) or []) if isinstance(payload_dbg, dict) else None
-                    _payload = {
-                        "event": "so_pdf_fastpath_summary",
-                        "request_id": request_id,
-                        "table_kinds": kinds,
-                        "total_order_grid_len": grid_len,
-                    }
-                    logger.info("so_pdf_fastpath_summary %s", json.dumps(_payload, ensure_ascii=False))
-                except Exception:
-                    pass
-
-            dt = time.perf_counter() - t0
-            logger.info(
-                "ocr_extract_sync_done",
-                extra={
-                    "request_id": request_id,
-                    "doc_filename": filename,
-                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
-                    "page_count": len(all_pages),
-                    "duration_sec": round(dt, 4),
-                    "pdf_text_sec": round(time.perf_counter() - t_pdf, 4),
-                },
-            )
-            return {
-                "schema_version": "1.0",
-                "document_meta": {
-                    "request_id": request_id,
-                    "filename": filename,
-                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
-                    "preprocess": {"enabled": False, "mode": None, "target": "pdf_text"},
-                    "page_count": len(all_pages),
-                    "timings": {"total_sec": round(dt, 4)},
-                },
-                "warnings": warnings,
-                "errors": errors,
-                "filename": filename,
-                "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
-                "pages": all_pages,
-                "text": "\n\n".join(combined_texts).strip(),
-                "tables": combined_tables,
-                "fields": combined_fields,
-                "field_pairs": combined_field_pairs,
-                "sales_order_payload": _build_sales_order_payload(combined_tables),
-            }
 
     images_bgr = _images_from_upload(filename, file_bytes)
 
@@ -5962,59 +5756,83 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     combined_texts: List[str] = []
     for page_idx, img_bgr in enumerate(images_bgr, start=1):
         t_page0 = time.perf_counter()
-        prep_meta: Dict[str, Any] = {"enabled": preprocess}
-
-        if preprocess:
-            if engine in ("paddle", "paddle_structure", "paddle_ensemble"):
-                processed_bgr, meta = preprocess_paddle_mode(img_bgr, preprocess_mode)
-                prep_meta.update({"target": "paddle"})
-                prep_meta.update(meta)
-                input_for_ocr = processed_bgr
-                image_for_tables = processed_bgr
+        if preprocess_for_engine is not None:
+            input_for_ocr, image_for_tables, prep_meta = preprocess_for_engine(
+                engine=engine,
+                preprocess=preprocess,
+                preprocess_mode=preprocess_mode,
+                img_bgr=img_bgr,
+                preprocess_paddle_mode=preprocess_paddle_mode,
+                preprocess_opencv_mode=preprocess_opencv_mode,
+            )
+        else:
+            prep_meta: Dict[str, Any] = {"enabled": preprocess}
+            if preprocess:
+                if engine in ("paddle", "paddle_structure", "paddle_ensemble"):
+                    processed_bgr, meta = preprocess_paddle_mode(img_bgr, preprocess_mode)
+                    prep_meta.update({"target": "paddle"})
+                    prep_meta.update(meta)
+                    input_for_ocr = processed_bgr
+                    image_for_tables = processed_bgr
+                else:
+                    processed_gray, meta = preprocess_opencv_mode(img_bgr, preprocess_mode)
+                    prep_meta.update({"target": "tesseract"})
+                    prep_meta.update(meta)
+                    input_for_ocr = processed_gray
+                    image_for_tables = processed_gray
             else:
-                processed_gray, meta = preprocess_opencv_mode(img_bgr, preprocess_mode)
-                prep_meta.update({"target": "tesseract"})
-                prep_meta.update(meta)
-                input_for_ocr = processed_gray
-                image_for_tables = processed_gray
-        else:
-            input_for_ocr = img_bgr
-            image_for_tables = img_bgr
+                input_for_ocr = img_bgr
+                image_for_tables = img_bgr
 
-        if engine == "tesseract":
-            page_res = _run_tesseract(input_for_ocr)
-        elif engine == "paddle_structure":
-            page_res = _run_paddle_structure(_ensure_bgr(input_for_ocr))
-            page_res["avg_confidence"] = None
-            page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
-            page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
-        elif engine == "paddle_ensemble":
-            bgr = _ensure_bgr(input_for_ocr)
-            struct_res = _run_paddle_structure(bgr)
-            paddle_res = _run_paddle(bgr)
-            merged_text = _merge_text(struct_res.get("text") or "", paddle_res.get("text") or "", paddle_res.get("avg_confidence"))
-            merged_text = _postprocess_ocr_text(merged_text)
-            page_res = {
-                "engine": "paddle_ensemble",
-                "layout": struct_res.get("layout") or [],
-                "tables": struct_res.get("tables") or [],
-                "text": merged_text,
-                "avg_confidence": paddle_res.get("avg_confidence"),
-                "lines": paddle_res.get("lines") or [],
-            }
-            if not page_res.get("tables"):
-                page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, {"lines": page_res.get("lines")})
-            page_res["fields"] = _extract_fields_smart(merged_text, page_res.get("tables") or [])
+        if run_page_ocr is not None:
+            page_res = run_page_ocr(
+                engine=engine,
+                input_for_ocr=input_for_ocr,
+                image_for_tables=image_for_tables,
+                run_tesseract=_run_tesseract,
+                run_paddle=_run_paddle,
+                run_paddle_structure=_run_paddle_structure,
+                ensure_bgr=_ensure_bgr,
+                merge_text=_merge_text,
+                postprocess_ocr_text=_postprocess_ocr_text,
+                extract_fields_smart=_extract_fields_smart,
+                extract_tables_from_paddle_page=_extract_tables_from_paddle_page,
+            )
         else:
-            page_res = _run_paddle(_ensure_bgr(input_for_ocr))
+            if engine == "tesseract":
+                page_res = _run_tesseract(input_for_ocr)
+            elif engine == "paddle_structure":
+                page_res = _run_paddle_structure(_ensure_bgr(input_for_ocr))
+                page_res["avg_confidence"] = None
+                page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
+                page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
+            elif engine == "paddle_ensemble":
+                bgr = _ensure_bgr(input_for_ocr)
+                struct_res = _run_paddle_structure(bgr)
+                paddle_res = _run_paddle(bgr)
+                merged_text = _merge_text(struct_res.get("text") or "", paddle_res.get("text") or "", paddle_res.get("avg_confidence"))
+                merged_text = _postprocess_ocr_text(merged_text)
+                page_res = {
+                    "engine": "paddle_ensemble",
+                    "layout": struct_res.get("layout") or [],
+                    "tables": struct_res.get("tables") or [],
+                    "text": merged_text,
+                    "avg_confidence": paddle_res.get("avg_confidence"),
+                    "lines": paddle_res.get("lines") or [],
+                }
+                if not page_res.get("tables"):
+                    page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, {"lines": page_res.get("lines")})
+                page_res["fields"] = _extract_fields_smart(merged_text, page_res.get("tables") or [])
+            else:
+                page_res = _run_paddle(_ensure_bgr(input_for_ocr))
+
+            if engine == "paddle":
+                page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, page_res)
+                page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
+                page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
 
         page_res["page"] = page_idx
         page_res["preprocess"] = prep_meta
-
-        if engine == "paddle":
-            page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, page_res)
-            page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
-            page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
 
         # CARE INSTRUCTIONS crop re-OCR fallback for paddle-based engines
         try:
@@ -6538,10 +6356,31 @@ async def ocr_extract(
     view: str = Query("json"),
 ) -> JSONResponse:
     t0 = time.perf_counter()
-    request_id = request.headers.get("x-request-id") or request.headers.get("x-correlation-id") or str(uuid.uuid4())
+    if get_request_id is not None:
+        request_id = get_request_id(request)
+    else:
+        request_id = request.headers.get("x-request-id") or request.headers.get("x-correlation-id") or str(uuid.uuid4())
     warnings: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     content_type = request.headers.get("content-type")
+
+    try:
+        if log_json is not None:
+            log_json(
+                logger,
+                logging.INFO,
+                "ocr_extract_start",
+                {
+                    "request_id": request_id,
+                    "content_type": content_type,
+                    "engine": engine,
+                    "preprocess": preprocess,
+                    "preprocess_mode": preprocess_mode,
+                    "view": view,
+                },
+            )
+    except Exception:
+        pass
 
     if file is not None:
         filename = file.filename or "uploaded"
@@ -6567,244 +6406,34 @@ async def ocr_extract(
         # Normalize filename so downstream logic and logs clearly indicate PDF.
         if not filename.lower().endswith(".pdf"):
             filename = f"{filename}.pdf"
-        pages_text = _pdf_text_pages(file_bytes)
-        joined = "\n\n".join([t for t in (pages_text or []) if (t or "").strip()]).strip()
-        page_count = len(pages_text or [])
-        pdf_tables_pages = _pdf_tables_pages_tabula(file_bytes, page_count) if page_count else None
-        has_pdf_tables = any((isinstance(p, list) and len(p) > 0) for p in (pdf_tables_pages or []))
-
-        # Digital-PDF fast path (pdfplumber text + Tabula tables) for any engine.
-        # Fall back to OCR if there is no usable embedded text and no tables.
-        if ((joined and len(joined) >= 50) or has_pdf_tables):
-            all_pages: List[Dict[str, Any]] = []
-            combined_texts: List[str] = []
-            for i, t in enumerate(pages_text or [], start=1):
-                pp_text = _postprocess_ocr_text(t or "")
-                page_tables: List[Dict[str, Any]] = []
-                if isinstance(pdf_tables_pages, list) and i - 1 < len(pdf_tables_pages):
-                    for tt in (pdf_tables_pages[i - 1] or []):
-                        if isinstance(tt, dict) and tt.get("headers") and tt.get("rows"):
-                            page_tables.append(tt)
-                pp_fields = _extract_fields_smart(pp_text, page_tables)
-                page_res: Dict[str, Any] = {
-                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
-                    "page": i,
-                    "text": pp_text,
-                    "tables": page_tables,
-                    "fields": pp_fields,
-                    "field_pairs": _fields_to_pairs(pp_fields),
-                    "preprocess": {"enabled": False, "target": "pdf_text"},
-                }
-                try:
-                    page_res["tables"] = [_build_ai_kv_table_from_fields(pp_fields)] + (page_res.get("tables") or [])
-                except Exception:
-                    warnings.append({"page": i, "code": "AI_TABLE_BUILD_FAILED", "message": "Failed to build AI key/value table"})
-                    page_res["tables"] = page_res.get("tables") or []
-                all_pages.append(page_res)
-                if pp_text.strip():
-                    combined_texts.append(pp_text.strip())
-
-            combined_fields: List[Dict[str, Any]] = []
-            for p in all_pages:
-                if p.get("fields"):
-                    combined_fields.append({"page": p.get("page"), **(p.get("fields") or {})})
-
-            combined_field_pairs: List[Dict[str, Any]] = []
-            for p in all_pages:
-                for pair in (p.get("field_pairs") or []):
-                    if isinstance(pair, dict) and pair.get("key") is not None and pair.get("value") is not None:
-                        combined_field_pairs.append({"page": p.get("page"), **pair})
-
-            combined_tables: List[Dict[str, Any]] = []
-            for p in all_pages:
-                for t in (p.get("tables") or []):
-                    tt = {"page": p.get("page"), **t}
-                    try:
-                        tt = _table_add_rows_matrix(tt)
-                    except Exception:
-                        pass
-                    combined_tables.append(tt)
-
-            if so_dbg_tables:
-                try:
-                    debug_tables: List[Dict[str, Any]] = []
-                    for t in combined_tables[:12]:
-                        if not isinstance(t, dict):
-                            continue
-                        headers = t.get("headers") or []
-                        debug_tables.append(
-                            {
-                                "page": t.get("page"),
-                                "table_kind": str(t.get("table_kind") or ""),
-                                "headers": [str(h or "") for h in headers[:12]],
-                                "row_count": len(t.get("rows") or []) if isinstance(t.get("rows"), list) else None,
-                            }
-                        )
-                    _payload = {
-                        "event": "so_pdf_fastpath_tables_pre_filter",
-                        "request_id": request_id,
-                        "table_count": len(combined_tables),
-                        "tables": debug_tables,
-                    }
-                    logger.info("so_pdf_fastpath_tables_pre_filter %s", json.dumps(_payload, ensure_ascii=False))
-                except Exception:
-                    pass
-
-            combined_tables = _filter_tables_for_sales_order(combined_tables)
-            combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
-            combined_tables = _filter_tables_for_sales_order(combined_tables)
+        if try_pdf_digital_fastpath is not None:
             try:
-                for t in combined_tables:
-                    if not isinstance(t, dict):
-                        continue
-                    if str(t.get("table_kind") or "").strip().lower() in {"total_order_grid", "partial_deliveries_grid"}:
-                        try:
-                            _normalize_size_grid_columns(t)
-                        except Exception as e:
-                            if so_dbg_tables:
-                                try:
-                                    rows0 = t.get("rows") or []
-                                    row_keys = list((rows0[0] or {}).keys())[:12] if isinstance(rows0, list) and rows0 and isinstance(rows0[0], dict) else None
-                                    logger.info(
-                                        "so_pdf_fastpath_normalize_failed %s",
-                                        json.dumps(
-                                            {
-                                                "event": "so_pdf_fastpath_normalize_failed",
-                                                "request_id": request_id,
-                                                "page": t.get("page"),
-                                                "table_kind": str(t.get("table_kind") or ""),
-                                                "headers": [str(h or "") for h in (t.get("headers") or [])[:12]],
-                                                "row0_keys": row_keys,
-                                                "error": str(e),
-                                            },
-                                            ensure_ascii=False,
-                                        ),
-                                    )
-                                except Exception:
-                                    pass
+                out_fast = try_pdf_digital_fastpath(
+                    request_id=request_id,
+                    filename=filename,
+                    file_bytes=file_bytes,
+                    so_dbg_tables=so_dbg_tables,
+                    warnings=warnings,
+                    errors=errors,
+                    logger=logger,
+                    log_json=log_json,
+                    pdf_text_pages=_pdf_text_pages,
+                    pdf_tables_pages_tabula=_pdf_tables_pages_tabula,
+                    postprocess_ocr_text=_postprocess_ocr_text,
+                    extract_fields_smart=_extract_fields_smart,
+                    fields_to_pairs=_fields_to_pairs,
+                    build_ai_kv_table_from_fields=_build_ai_kv_table_from_fields,
+                    table_add_rows_matrix=_table_add_rows_matrix,
+                    filter_tables_for_sales_order=_filter_tables_for_sales_order,
+                    normalize_size_grid_columns=_normalize_size_grid_columns,
+                    dedup_top_level_ai_kv_tables=_dedup_top_level_ai_kv_tables,
+                    build_sales_order_payload=_build_sales_order_payload,
+                    parse_total_order_from_text=_parse_total_order_from_text,
+                )
+                if isinstance(out_fast, dict):
+                    return JSONResponse(out_fast)
             except Exception:
                 pass
-            combined_tables = _dedup_top_level_ai_kv_tables(combined_tables)
-
-            # Fallback: parse TOTAL ORDER from embedded text when Tabula tables are missing/misclassified.
-            try:
-                payload0 = _build_sales_order_payload(combined_tables)
-                grid0 = ((payload0.get("total_order") or {}).get("grid")) if isinstance(payload0, dict) else None
-                if not (isinstance(grid0, list) and len(grid0) > 0):
-                    parsed = _parse_total_order_from_text("\n".join(combined_texts))
-                    if isinstance(parsed, dict):
-                        unit_lot = parsed.get("unit_lot") if isinstance(parsed.get("unit_lot"), str) else None
-                        if unit_lot is not None:
-                            try:
-                                rows_p = parsed.get("rows")
-                                if isinstance(rows_p, list):
-                                    rows_p.append({"COLOUR": "UNIT LOT", "XS": str(unit_lot)})
-                                    parsed["rows"] = rows_p
-                            except Exception:
-                                pass
-                        combined_tables.append(parsed)
-                        combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
-                        try:
-                            for t in combined_tables:
-                                if isinstance(t, dict) and str(t.get("table_kind") or "").strip().lower() == "total_order_grid":
-                                    _normalize_size_grid_columns(t)
-                        except Exception:
-                            pass
-                        if so_dbg_tables:
-                            try:
-                                _payload = {
-                                    "event": "so_pdf_fastpath_total_order_text_fallback_used",
-                                    "request_id": request_id,
-                                    "row_count": len(parsed.get("rows") or []),
-                                }
-                                logger.info("so_pdf_fastpath_total_order_text_fallback_used %s", json.dumps(_payload, ensure_ascii=False))
-                            except Exception:
-                                pass
-                    elif so_dbg_tables:
-                        try:
-                            # Provide a small snippet around TOTAL ORDER for debugging
-                            full = "\n".join(combined_texts)
-                            m = re.search(r"(?i)TOTAL\s+ORDER", full)
-                            if m:
-                                a = max(0, m.start() - 300)
-                                b = min(len(full), m.start() + 900)
-                                snippet = full[a:b]
-                            else:
-                                snippet = full[:900]
-                            logger.info(
-                                "so_pdf_fastpath_total_order_text_fallback_none %s",
-                                json.dumps(
-                                    {
-                                        "event": "so_pdf_fastpath_total_order_text_fallback_none",
-                                        "request_id": request_id,
-                                        "note": "_parse_total_order_from_text returned None",
-                                        "snippet": snippet,
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                            )
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-            if so_dbg_tables:
-                try:
-                    kinds: Dict[str, int] = {}
-                    for t in combined_tables:
-                        if not isinstance(t, dict):
-                            continue
-                        k = str(t.get("table_kind") or "").strip() or "(none)"
-                        kinds[k] = int(kinds.get(k, 0)) + 1
-                    payload_dbg = _build_sales_order_payload(combined_tables)
-                    grid_len = len(((payload_dbg.get("total_order") or {}).get("grid")) or []) if isinstance(payload_dbg, dict) else None
-                    _payload = {
-                        "event": "so_pdf_fastpath_summary",
-                        "request_id": request_id,
-                        "table_kinds": kinds,
-                        "total_order_grid_len": grid_len,
-                    }
-                    logger.info("so_pdf_fastpath_summary %s", json.dumps(_payload, ensure_ascii=False))
-                except Exception:
-                    pass
-
-            dt = time.perf_counter() - t0
-            logger.info(
-                "ocr_extract_done",
-                extra={
-                    "request_id": request_id,
-                    "doc_filename": filename,
-                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
-                    "page_count": len(all_pages),
-                    "duration_sec": round(dt, 4),
-                    "warnings": len(warnings),
-                    "errors": len(errors),
-                },
-            )
-
-            return JSONResponse(
-                {
-                    "schema_version": "1.0",
-                    "document_meta": {
-                        "request_id": request_id,
-                        "filename": filename,
-                        "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
-                        "preprocess": {"enabled": False, "mode": None, "target": "pdf_text"},
-                        "page_count": len(all_pages),
-                        "timings": {"total_sec": round(dt, 4)},
-                    },
-                    "warnings": warnings,
-                    "errors": errors,
-                    "filename": filename,
-                    "engine": "pdfplumber_tabula" if has_pdf_tables else "pdfplumber",
-                    "pages": all_pages,
-                    "text": "\n\n".join(combined_texts).strip(),
-                    "tables": combined_tables,
-                    "fields": combined_fields,
-                    "field_pairs": combined_field_pairs,
-                    "sales_order_payload": _build_sales_order_payload(combined_tables),
-                }
-            )
 
     try:
         images_bgr = _images_from_upload(filename, file_bytes)
@@ -6830,65 +6459,90 @@ async def ocr_extract(
 
         image_for_tables: np.ndarray
 
-        if preprocess:
-            if engine in ("paddle", "paddle_structure", "paddle_ensemble"):
-                processed_bgr, meta = preprocess_paddle_mode(img_bgr, preprocess_mode)
-                prep_meta.update({"target": "paddle"})
-                prep_meta.update(meta)
-                input_for_ocr = processed_bgr
-                image_for_tables = processed_bgr
-            else:
-                processed_gray, meta = preprocess_opencv_mode(img_bgr, preprocess_mode)
-                prep_meta.update({"target": "tesseract"})
-                prep_meta.update(meta)
-                input_for_ocr = processed_gray
-                image_for_tables = processed_gray
+        if preprocess_for_engine is not None:
+            input_for_ocr, image_for_tables, prep_meta = preprocess_for_engine(
+                engine=engine,
+                preprocess=preprocess,
+                preprocess_mode=preprocess_mode,
+                img_bgr=img_bgr,
+                preprocess_paddle_mode=preprocess_paddle_mode,
+                preprocess_opencv_mode=preprocess_opencv_mode,
+            )
         else:
-            input_for_ocr = img_bgr
-            image_for_tables = img_bgr
+            if preprocess:
+                if engine in ("paddle", "paddle_structure", "paddle_ensemble"):
+                    processed_bgr, meta = preprocess_paddle_mode(img_bgr, preprocess_mode)
+                    prep_meta.update({"target": "paddle"})
+                    prep_meta.update(meta)
+                    input_for_ocr = processed_bgr
+                    image_for_tables = processed_bgr
+                else:
+                    processed_gray, meta = preprocess_opencv_mode(img_bgr, preprocess_mode)
+                    prep_meta.update({"target": "tesseract"})
+                    prep_meta.update(meta)
+                    input_for_ocr = processed_gray
+                    image_for_tables = processed_gray
+            else:
+                input_for_ocr = img_bgr
+                image_for_tables = img_bgr
 
         try:
-            if engine == "tesseract":
-                page_res = _run_tesseract(input_for_ocr)
-            elif engine == "paddle_structure":
-                # structure expects bgr
-                page_res = _run_paddle_structure(_ensure_bgr(input_for_ocr))
-                page_res["avg_confidence"] = None
-                page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
-                page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
-            elif engine == "paddle_ensemble":
-                bgr = _ensure_bgr(input_for_ocr)
-                struct_res = _run_paddle_structure(bgr)
-                paddle_res = _run_paddle(bgr)
-
-                merged_text = _merge_text(struct_res.get("text") or "", paddle_res.get("text") or "", paddle_res.get("avg_confidence"))
-                merged_text = _postprocess_ocr_text(merged_text)
-
-                page_res = {
-                    "engine": "paddle_ensemble",
-                    "layout": struct_res.get("layout") or [],
-                    "tables": struct_res.get("tables") or [],
-                    "text": merged_text,
-                    "avg_confidence": paddle_res.get("avg_confidence"),
-                    "lines": paddle_res.get("lines") or [],
-                }
-
-                # If structure didn't output tables, fall back to heuristic paddle tables
-                if not page_res.get("tables"):
-                    page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, {"lines": page_res.get("lines")})
-
-                page_res["fields"] = _extract_fields_smart(merged_text, page_res.get("tables") or [])
+            if run_page_ocr is not None:
+                page_res = run_page_ocr(
+                    engine=engine,
+                    input_for_ocr=input_for_ocr,
+                    image_for_tables=image_for_tables,
+                    run_tesseract=_run_tesseract,
+                    run_paddle=_run_paddle,
+                    run_paddle_structure=_run_paddle_structure,
+                    ensure_bgr=_ensure_bgr,
+                    merge_text=_merge_text,
+                    postprocess_ocr_text=_postprocess_ocr_text,
+                    extract_fields_smart=_extract_fields_smart,
+                    extract_tables_from_paddle_page=_extract_tables_from_paddle_page,
+                )
             else:
-                # paddle expects bgr
-                page_res = _run_paddle(_ensure_bgr(input_for_ocr))
+                if engine == "tesseract":
+                    page_res = _run_tesseract(input_for_ocr)
+                elif engine == "paddle_structure":
+                    # structure expects bgr
+                    page_res = _run_paddle_structure(_ensure_bgr(input_for_ocr))
+                    page_res["avg_confidence"] = None
+                    page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
+                    page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
+                elif engine == "paddle_ensemble":
+                    bgr = _ensure_bgr(input_for_ocr)
+                    struct_res = _run_paddle_structure(bgr)
+                    paddle_res = _run_paddle(bgr)
+
+                    merged_text = _merge_text(struct_res.get("text") or "", paddle_res.get("text") or "", paddle_res.get("avg_confidence"))
+                    merged_text = _postprocess_ocr_text(merged_text)
+
+                    page_res = {
+                        "engine": "paddle_ensemble",
+                        "layout": struct_res.get("layout") or [],
+                        "tables": struct_res.get("tables") or [],
+                        "text": merged_text,
+                        "avg_confidence": paddle_res.get("avg_confidence"),
+                        "lines": paddle_res.get("lines") or [],
+                    }
+
+                    # If structure didn't output tables, fall back to heuristic paddle tables
+                    if not page_res.get("tables"):
+                        page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, {"lines": page_res.get("lines")})
+
+                    page_res["fields"] = _extract_fields_smart(merged_text, page_res.get("tables") or [])
+                else:
+                    # paddle expects bgr
+                    page_res = _run_paddle(_ensure_bgr(input_for_ocr))
+
+                if engine == "paddle":
+                    page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, page_res)
+                    page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
+                    page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
 
             page_res["page"] = page_idx
             page_res["preprocess"] = prep_meta
-
-            if engine == "paddle":
-                page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, page_res)
-                page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
-                page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
 
             if isinstance(page_res.get("tables"), list):
                 page_res["tables"] = _filter_tables_for_sales_order(page_res.get("tables") or [])
@@ -7012,18 +6666,37 @@ async def ocr_extract(
                 combined_field_pairs.append({"page": p.get("page"), **pair})
 
     dt = time.perf_counter() - t0
-    logger.info(
-        "ocr_extract_done",
-        extra={
-            "request_id": request_id,
-            "doc_filename": filename,
-            "engine": engine,
-            "page_count": len(all_pages),
-            "duration_sec": round(dt, 4),
-            "warnings": len(warnings),
-            "errors": len(errors),
-        },
-    )
+    try:
+        if log_json is not None:
+            log_json(
+                logger,
+                logging.INFO,
+                "ocr_extract_done",
+                {
+                    "request_id": request_id,
+                    "doc_filename": filename,
+                    "engine": engine,
+                    "page_count": len(all_pages),
+                    "duration_sec": round(dt, 4),
+                    "warnings": len(warnings),
+                    "errors": len(errors),
+                },
+            )
+        else:
+            logger.info(
+                "ocr_extract_done",
+                extra={
+                    "request_id": request_id,
+                    "doc_filename": filename,
+                    "engine": engine,
+                    "page_count": len(all_pages),
+                    "duration_sec": round(dt, 4),
+                    "warnings": len(warnings),
+                    "errors": len(errors),
+                },
+            )
+    except Exception:
+        pass
 
     sales_order_payload = _build_sales_order_payload(combined_tables)
 
