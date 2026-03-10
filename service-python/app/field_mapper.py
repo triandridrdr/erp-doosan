@@ -38,7 +38,6 @@ _HEADER_LABEL_TO_CANON: Dict[str, str] = {
     "ordernr": "ordernr",
     "order_nr": "ordernr",
     "orderno": "ordernr",
-    "order": "ordernr",
     "orderid": "ordernr",
     "ordernumber": "ordernr",
     "so": "ordernr",

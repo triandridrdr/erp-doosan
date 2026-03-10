@@ -1132,15 +1132,6 @@ def _table_add_rows_matrix(tbl: Any) -> Any:
         except Exception:
             return False
 
-        # Additional: if any tail token group looks like a label, consider contaminated
-        tokens = [tok for tok in re.split(r"\s+", t) if tok]
-        if len(tokens) >= 2:
-            for take in (1, 2, 3):
-                if len(tokens) <= take:
-                    continue
-                tail = " ".join(tokens[-take:])
-                if _looks_like_label(tail) is not None:
-                    return True
         return False
 
     kv_pairs: List[Dict[str, Any]] = []
@@ -2755,7 +2746,6 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
             "ordernr": "ordernr",
             "order_nr": "ordernr",
             "orderno": "ordernr",
-            "order": "ordernr",
             "orderid": "ordernr",
             "ordernumber": "ordernr",
             "no": "ordernr",
@@ -2907,12 +2897,67 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
         except Exception:
             return False
 
+    def _looks_like_colour_code(s: str) -> bool:
+        try:
+            ss = re.sub(r"\s+", " ", str(s or "").strip())
+            if not ss:
+                return False
+            # 800 - BLACK / 660 - WINE, etc.
+            return re.fullmatch(
+                r"\d{2,6}\s*[-–—]\s*[A-Z][A-Z0-9\s/]{2,}",
+                ss,
+                flags=re.IGNORECASE,
+            ) is not None
+        except Exception:
+            return False
+
+    def _looks_like_order_nr(s: str) -> bool:
+        try:
+            ss = re.sub(r"\s+", " ", str(s or "").strip())
+            if not ss:
+                return False
+            # Reject obvious colour-like values
+            if _looks_like_colour_code(ss):
+                return False
+
+            # Typical patterns: 54721-D, 528003-1322, 58884-D
+            if re.fullmatch(r"\d{3,8}[-/]\d{1,6}", ss):
+                return True
+            if re.fullmatch(r"\d{3,8}-[A-Z]{1,4}", ss, flags=re.IGNORECASE):
+                return True
+            if re.fullmatch(r"\d{3,8}-\d{1,6}-[A-Z]{1,4}", ss, flags=re.IGNORECASE):
+                return True
+
+            # Conservative fallback: has digits and a hyphen/slash, short, no long spaces
+            if len(ss) <= 20 and re.search(r"\d", ss) and re.search(r"[-/]", ss) and ss.count(" ") <= 1:
+                return True
+            return False
+        except Exception:
+            return False
+
     def _maybe_set_header(ck: str, v: str) -> None:
         if not ck:
             return
         if ck not in _HEADER_CANON_KEYS:
             return
         vv = str(v or "").strip()
+        if ck == "ordernr":
+            existing = str(payload["header"].get("ordernr") or "").strip()
+            # Prefer true order numbers and avoid overwriting with colour-like strings.
+            if existing:
+                ex_is_order = _looks_like_order_nr(existing)
+                vv_is_order = _looks_like_order_nr(vv)
+                if ex_is_order and not vv_is_order:
+                    return
+                if not ex_is_order and vv_is_order:
+                    payload["header"][ck] = vv
+                    return
+                if _looks_like_colour_code(vv) and not vv_is_order:
+                    return
+            else:
+                # No existing value yet: only block obvious colour codes.
+                if _looks_like_colour_code(vv) and not _looks_like_order_nr(vv):
+                    return
         if ck == "careinstructions":
             existing = str(payload["header"].get("careinstructions") or "").strip()
             if existing and _looks_like_care_value(existing):
