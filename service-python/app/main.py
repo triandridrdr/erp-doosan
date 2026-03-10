@@ -5808,6 +5808,12 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     is_pdf = filename.lower().endswith(".pdf") or _looks_like_pdf_bytes(file_bytes)
 
     if is_pdf:
+        # Always try to capture embedded PDF text for later template-specific fallbacks
+        try:
+            pages_text = _pdf_text_pages(file_bytes)
+        except Exception:
+            pages_text = None
+
         if try_pdf_digital_fastpath is not None:
             try:
                 out_fast = try_pdf_digital_fastpath(
@@ -6361,8 +6367,13 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         pass
     sales_order_payload = _build_sales_order_payload(combined_tables)
 
+    hm_bom_payload_override: Optional[Dict[str, Any]] = None
+
     try:
         joined_text = "\n".join([t for t in (combined_texts or []) if isinstance(t, str) and t.strip()]).strip()
+        embedded_text = "\n".join([t for t in (pages_text or []) if isinstance(t, str) and t.strip()]).strip() if pages_text else ""
+        # Prefer embedded PDF text (higher fidelity) but include OCR text as fallback.
+        hm_text = (embedded_text + "\n\n" + joined_text).strip() if embedded_text else joined_text
 
         def _is_hm_supplementary_text(t: str, fn: str) -> bool:
             if re.search(r"Supplementary\s+Product\s+Information", str(fn or ""), flags=re.IGNORECASE) is not None:
@@ -6374,22 +6385,55 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         def _hm_norm(s: str) -> str:
             return re.sub(r"\s+", " ", str(s or "").strip())
 
-        def _grab_after_label(t: str, label: str) -> str:
+        def _hm_clean_value(v: str) -> str:
+            vv = _hm_norm(v)
+            if not vv:
+                return ""
+            # If OCR keeps multiple columns in one line separated by large spaces, keep only first segment
+            vv = re.split(r"\s{2,}", vv)[0].strip() if vv else vv
+            # Trim common separators
+            vv = vv.strip(" :-\t")
+            return vv
+
+        def _grab_between_labels(t: str, label: str, stop_labels: List[str]) -> str:
+            """Grab value after `label` until newline or until next stop label.
+
+            Handles multi-column single-line layouts like:
+            'Order No 528003-1322    Product No 1335456'
+            by stopping at known labels.
+            """
             txt = str(t or "")
             if not txt.strip():
                 return ""
+
+            # Build stop lookahead
+            stop_alt = "|".join([re.escape(s) for s in (stop_labels or []) if str(s or "").strip()])
+            if stop_alt:
+                stop_re = r"(?=(?:\\n|\\r|\\b(?:" + stop_alt + r")\\b))"
+            else:
+                stop_re = r"(?=(?:\\n|\\r))"
+
+            # Inline capture: label + optional ':' + value (until stop)
+            pat = re.compile(
+                r"\\b" + re.escape(label) + r"\\b\s*[:\-]?\s*(.+?)" + stop_re,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            m = pat.search(txt)
+            if m:
+                return _hm_clean_value(m.group(1) or "")
+
+            # Fallback: line scan (label at line start)
             lines = [ln.strip() for ln in txt.replace("\r", "\n").split("\n")]
-            pat = re.compile(r"^\s*" + re.escape(label) + r"\s*[:\-]?\s*(.*)\s*$", flags=re.IGNORECASE)
+            pat2 = re.compile(r"^\s*" + re.escape(label) + r"\s*[:\-]?\s*(.*)\s*$", flags=re.IGNORECASE)
             for i, ln in enumerate(lines):
-                m = pat.match(ln)
-                if not m:
+                m2 = pat2.match(ln)
+                if not m2:
                     continue
-                tail = _hm_norm(m.group(1) or "")
+                tail = _hm_clean_value(m2.group(1) or "")
                 if tail:
                     return tail
-                # next non-empty line
                 for j in range(i + 1, min(len(lines), i + 4)):
-                    nxt = _hm_norm(lines[j])
+                    nxt = _hm_clean_value(lines[j])
                     if nxt:
                         return nxt
                 return ""
@@ -6437,29 +6481,66 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         if isinstance(sales_order_payload, dict) and _is_hm_supplementary_text(joined_text, filename):
             patch: Dict[str, Any] = {}
-            order_no = _grab_after_label(joined_text, "Order No") or _grab_after_label(joined_text, "Order Nr")
+
+            # Tolerant regex extractors (works on embedded PDF text and OCR text)
+            def _grab_re(pat: str) -> str:
+                try:
+                    m = re.search(pat, hm_text, flags=re.IGNORECASE | re.MULTILINE)
+                    if not m:
+                        return ""
+                    return _hm_clean_value(m.group(1) or "")
+                except Exception:
+                    return ""
+
+            order_no = _grab_re(r"\border\s*(?:no|nr)\b\s*[:\-]?\s*([0-9][0-9A-Z\-/]{3,25})")
             if order_no:
                 patch["ordernr"] = order_no
-            date_of_order = _grab_after_label(joined_text, "Date of Order")
+
+            date_of_order = _grab_re(
+                r"\bdate\s*of\s*order\b\s*[:\-]?\s*(\d{1,2}\s+[A-Z]{3,9}\s+\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})"
+            )
             if date_of_order:
                 patch["date"] = date_of_order
-            supplier_code = _grab_after_label(joined_text, "Supplier Code")
+
+            supplier_code = _grab_re(r"\bsupplier\s*code\b\s*[:\-]?\s*(\d{2,10})")
             if supplier_code:
                 patch["supplierref"] = supplier_code
-            supplier_name = _grab_after_label(joined_text, "Supplier Name")
+
+            # Supplier name: take until next label-like token (Product/Season/etc)
+            try:
+                m_sup = re.search(
+                    r"\bsupplier\s*name\b\s*[:\-]?\s*(.+?)(?=(\n|\r|\bproduct\s*no\b|\bproduct\s*name\b|\bproduct\s*type\b|\bseason\b|\bcustoms\b|\btype\s*of\s*construction\b|\bbill\s*of\s*material\b))",
+                    hm_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                supplier_name = _hm_clean_value(m_sup.group(1) or "") if m_sup else ""
+            except Exception:
+                supplier_name = ""
             if supplier_name:
                 patch["supplier"] = supplier_name
-            product_no = _grab_after_label(joined_text, "Product No")
+
+            product_no = _grab_re(r"\bproduct\s*no\b\s*[:\-]?\s*([0-9]{4,12})")
             if product_no:
                 patch["article"] = product_no
-            product_name = _grab_after_label(joined_text, "Product Name")
+
+            try:
+                m_pn = re.search(
+                    r"\bproduct\s*name\b\s*[:\-]?\s*(.+?)(?=(\n|\r|\bproduct\s*type\b|\bseason\b|\bcustoms\b|\btype\s*of\s*construction\b|\bbill\s*of\s*material\b))",
+                    hm_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                product_name = _hm_clean_value(m_pn.group(1) or "") if m_pn else ""
+            except Exception:
+                product_name = ""
             if product_name:
                 patch["description"] = product_name
-            season = _grab_after_label(joined_text, "Season")
+
+            season = _grab_re(r"\bseason\b\s*[:\-]?\s*([0-9]\s*[-/]\s*\d{4}|[SW]\s*\d{4})")
             if season:
                 patch["season"] = season
 
             hdr = sales_order_payload.get("header") if isinstance(sales_order_payload.get("header"), dict) else {}
+            hdr_before = dict(hdr) if isinstance(hdr, dict) else {}
             for k, v in patch.items():
                 vv = _hm_norm(str(v or ""))
                 if not vv:
@@ -6468,12 +6549,88 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if (not cur) or _is_bad_hm_value(k, cur):
                     hdr[k] = vv
             sales_order_payload["header"] = hdr
+
+            if so_dbg_tables:
+                try:
+                    logger.info(
+                        "hm_supp_header_debug %s",
+                        json.dumps(
+                            {
+                                "event": "hm_supp_header_debug",
+                                "request_id": request_id,
+                                "patch": patch,
+                                "header_before": hdr_before,
+                                "header_after": hdr,
+                                "has_embedded_text": bool(embedded_text),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                except Exception:
+                    pass
+
+            try:
+                if build_bom_payload is not None and isinstance(combined_tables, list) and combined_tables:
+                    def _find_hm_materials_trims_table(tables: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+                        best = None
+                        best_score = 0
+                        for t in tables:
+                            if not isinstance(t, dict):
+                                continue
+                            headers = t.get("headers") or []
+                            rm = t.get("rows_matrix") or []
+                            if not isinstance(headers, list) or not isinstance(rm, list) or len(rm) < 2:
+                                continue
+                            head_blob = " ".join([str(h or "") for h in headers[:10]]).strip()
+                            row0 = rm[0] if (rm and isinstance(rm[0], list)) else []
+                            row1 = rm[1] if (len(rm) > 1 and isinstance(rm[1], list)) else []
+                            row_blob = " ".join([str(x or "") for x in (row0 or [])]).strip()
+                            row_blob2 = " ".join([str(x or "") for x in (row1 or [])]).strip()
+                            blob = (head_blob + " " + row_blob + " " + row_blob2).strip()
+                            if not blob:
+                                continue
+                            score = 0
+                            if re.search(r"\bBill\s+of\s+Material\b", blob, flags=re.IGNORECASE):
+                                score += 6
+                            if re.search(r"\bMaterials\b", blob, flags=re.IGNORECASE):
+                                score += 4
+                            if re.search(r"\bTrims\b", blob, flags=re.IGNORECASE):
+                                score += 4
+                            if re.search(r"\b(Composition|Consumption|Weight|Material\s+Supplier|Supplier\s+Article|Component\s+Treatments)\b", blob, flags=re.IGNORECASE):
+                                score += 2
+                            if score > best_score:
+                                best_score = score
+                                best = t
+                        return best if best_score >= 10 else None
+
+                    mt_tbl = _find_hm_materials_trims_table(combined_tables)
+                    if mt_tbl is not None:
+                        hm_bom_payload_override = build_bom_payload(tables=[mt_tbl])
+                        if so_dbg_tables:
+                            try:
+                                logger.info(
+                                    "hm_supp_bom_debug %s",
+                                    json.dumps(
+                                        {
+                                            "event": "hm_supp_bom_debug",
+                                            "request_id": request_id,
+                                            "matched": mt_tbl is not None,
+                                            "has_bom_payload": hm_bom_payload_override is not None,
+                                            "headers": (mt_tbl.get("headers") or [])[:20],
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                )
+                            except Exception:
+                                pass
+            except Exception:
+                pass
     except Exception:
         pass
     bom_payload = None
     try:
         if build_bom_payload is not None:
-            bom_payload = build_bom_payload(tables=combined_tables)
+            bom_payload = hm_bom_payload_override or build_bom_payload(tables=combined_tables)
     except Exception:
         bom_payload = None
 
@@ -6622,12 +6779,21 @@ async def ocr_extract(
 
     so_dbg_tables = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
 
+    pages_text: Optional[List[str]] = None
+
     # If PDF has embedded text (selectable text), prefer extracting it directly.
     is_pdf = filename.lower().endswith(".pdf") or (isinstance(content_type, str) and "pdf" in content_type.lower()) or _looks_like_pdf_bytes(file_bytes)
     if is_pdf:
         # Normalize filename so downstream logic and logs clearly indicate PDF.
         if not filename.lower().endswith(".pdf"):
             filename = f"{filename}.pdf"
+
+        # Always capture embedded text for later template-specific fallbacks even if PDF fast-path fails.
+        try:
+            pages_text = _pdf_text_pages(file_bytes)
+        except Exception:
+            pages_text = None
+
         if try_pdf_digital_fastpath is not None:
             try:
                 out_fast = try_pdf_digital_fastpath(
@@ -6944,6 +7110,219 @@ async def ocr_extract(
             bom_payload = build_bom_payload(tables=combined_tables)
     except Exception:
         bom_payload = None
+
+    # HM Supplementary: fix header grouping and BOM extraction when Tabula fast-path fails and OCR KV becomes contaminated.
+    try:
+        joined_text = "\n".join([t for t in (combined_texts or []) if isinstance(t, str) and t.strip()]).strip()
+        embedded_text = "\n".join([t for t in (pages_text or []) if isinstance(t, str) and t.strip()]).strip() if pages_text else ""
+        hm_text = (embedded_text + "\n\n" + joined_text).strip() if embedded_text else joined_text
+
+        def _is_hm_supplementary_text(t: str, fn: str) -> bool:
+            if re.search(r"Supplementary\s+Product\s+Information", str(fn or ""), flags=re.IGNORECASE) is not None:
+                return True
+            if re.search(r"\bSupplementary\s+Product\s+Information\b", str(t or ""), flags=re.IGNORECASE) is None:
+                return False
+            return True
+
+        def _hm_norm(s: str) -> str:
+            return re.sub(r"\s+", " ", str(s or "").strip())
+
+        def _hm_clean_value(v: str) -> str:
+            vv = _hm_norm(v)
+            if not vv:
+                return ""
+            vv = re.split(r"\s{2,}", vv)[0].strip() if vv else vv
+            vv = vv.strip(" :-\t")
+            return vv
+
+        def _looks_like_colour_code(v: str) -> bool:
+            ss = _hm_norm(v)
+            if not ss:
+                return False
+            return re.fullmatch(r"\d{2,6}\s*[-–—]\s*[A-Z][A-Z0-9\s/]{2,}", ss, flags=re.IGNORECASE) is not None
+
+        def _is_bad_hm_value(k: str, v: str) -> bool:
+            kk = str(k or "").strip().lower()
+            vv = _hm_norm(v)
+            if not vv:
+                return True
+            v_l = vv.lower()
+            if kk == "date":
+                if "season" in v_l or "supplier" in v_l or "order" in v_l:
+                    return True
+                if re.search(r"\b\d{4}-\d{2}-\d{2}\b", vv):
+                    return False
+                if re.search(r"\b\d{1,2}/\d{1,2}/\d{4}\b", vv):
+                    return False
+                if re.search(r"\b\d{1,2}\s+[A-Z]{3,9}\s+\d{4}\b", vv, flags=re.IGNORECASE):
+                    return False
+                return True
+            if kk == "supplier":
+                if v_l in {"send to", "sendto", "ship to", "shipto", "code"}:
+                    return True
+                return False
+            if kk == "article":
+                if _looks_like_colour_code(vv):
+                    return True
+                if re.search(r"\d", vv) is None:
+                    return True
+                if re.fullmatch(r"elastic|buckle|shell|trim", re.sub(r"[^a-z]", "", v_l)):
+                    return True
+                return False
+            if kk == "supplierref":
+                if re.fullmatch(r"\d{2,10}", re.sub(r"\s+", "", vv)):
+                    return False
+                return True
+            return False
+
+        if isinstance(sales_order_payload, dict) and _is_hm_supplementary_text(hm_text, filename):
+            patch: Dict[str, Any] = {}
+
+            def _grab_re(pat: str) -> str:
+                try:
+                    m = re.search(pat, hm_text, flags=re.IGNORECASE | re.MULTILINE)
+                    if not m:
+                        return ""
+                    return _hm_clean_value(m.group(1) or "")
+                except Exception:
+                    return ""
+
+            order_no = _grab_re(r"\border\s*(?:no|nr)\b\s*[:\-]?\s*([0-9][0-9A-Z\-/]{3,25})")
+            if order_no:
+                patch["ordernr"] = order_no
+
+            date_of_order = _grab_re(
+                r"\bdate\s*of\s*order\b\s*[:\-]?\s*(\d{1,2}\s+[A-Z]{3,9}\s+\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})"
+            )
+            if date_of_order:
+                patch["date"] = date_of_order
+
+            supplier_code = _grab_re(r"\bsupplier\s*code\b\s*[:\-]?\s*(\d{2,10})")
+            if supplier_code:
+                patch["supplierref"] = supplier_code
+
+            try:
+                m_sup = re.search(
+                    r"\bsupplier\s*name\b\s*[:\-]?\s*(.+?)(?=(\n|\r|\bproduct\s*no\b|\bproduct\s*name\b|\bproduct\s*type\b|\bseason\b|\bcustoms\b|\btype\s*of\s*construction\b|\bbill\s*of\s*material\b))",
+                    hm_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                supplier_name = _hm_clean_value(m_sup.group(1) or "") if m_sup else ""
+            except Exception:
+                supplier_name = ""
+            if supplier_name:
+                patch["supplier"] = supplier_name
+
+            product_no = _grab_re(r"\bproduct\s*no\b\s*[:\-]?\s*([0-9]{4,12})")
+            if product_no:
+                patch["article"] = product_no
+
+            try:
+                m_pn = re.search(
+                    r"\bproduct\s*name\b\s*[:\-]?\s*(.+?)(?=(\n|\r|\bproduct\s*type\b|\bseason\b|\bcustoms\b|\btype\s*of\s*construction\b|\bbill\s*of\s*material\b))",
+                    hm_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                product_name = _hm_clean_value(m_pn.group(1) or "") if m_pn else ""
+            except Exception:
+                product_name = ""
+            if product_name:
+                patch["description"] = product_name
+
+            season = _grab_re(r"\bseason\b\s*[:\-]?\s*([0-9]\s*[-/]\s*\d{4}|[SW]\s*\d{4})")
+            if season:
+                patch["season"] = season
+
+            hdr = sales_order_payload.get("header") if isinstance(sales_order_payload.get("header"), dict) else {}
+            hdr_before = dict(hdr) if isinstance(hdr, dict) else {}
+            for k, v in patch.items():
+                vv = _hm_norm(str(v or ""))
+                if not vv:
+                    continue
+                cur = _hm_norm(str(hdr.get(k) or ""))
+                if (not cur) or _is_bad_hm_value(k, cur):
+                    hdr[k] = vv
+            sales_order_payload["header"] = hdr
+
+            # BOM override: pick Materials & Trims table when possible
+            hm_bom_payload_override: Optional[Dict[str, Any]] = None
+            try:
+                if build_bom_payload is not None and isinstance(combined_tables, list) and combined_tables:
+                    def _find_hm_materials_trims_table(tables: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+                        best = None
+                        best_score = 0
+                        for t in tables:
+                            if not isinstance(t, dict):
+                                continue
+                            headers = t.get("headers") or []
+                            rm = t.get("rows_matrix") or []
+                            if not isinstance(headers, list) or not isinstance(rm, list) or len(rm) < 2:
+                                continue
+                            head_blob = " ".join([str(h or "") for h in headers[:10]]).strip()
+                            row0 = rm[0] if (rm and isinstance(rm[0], list)) else []
+                            row1 = rm[1] if (len(rm) > 1 and isinstance(rm[1], list)) else []
+                            row_blob = " ".join([str(x or "") for x in (row0 or [])]).strip()
+                            row_blob2 = " ".join([str(x or "") for x in (row1 or [])]).strip()
+                            blob = (head_blob + " " + row_blob + " " + row_blob2).strip()
+                            if not blob:
+                                continue
+                            score = 0
+                            if re.search(r"\bBill\s+of\s+Material\b", blob, flags=re.IGNORECASE):
+                                score += 6
+                            if re.search(r"\bMaterials\b", blob, flags=re.IGNORECASE):
+                                score += 4
+                            if re.search(r"\bTrims\b", blob, flags=re.IGNORECASE):
+                                score += 4
+                            if re.search(r"\b(Composition|Consumption|Weight|Material\s+Supplier|Supplier\s+Article|Component\s+Treatments)\b", blob, flags=re.IGNORECASE):
+                                score += 2
+                            if score > best_score:
+                                best_score = score
+                                best = t
+                        return best if best_score >= 10 else None
+
+                    mt_tbl = _find_hm_materials_trims_table(combined_tables)
+                    if mt_tbl is not None:
+                        hm_bom_payload_override = build_bom_payload(tables=[mt_tbl])
+            except Exception:
+                hm_bom_payload_override = None
+
+            if hm_bom_payload_override is not None:
+                bom_payload = hm_bom_payload_override
+
+            if so_dbg_tables:
+                try:
+                    logger.info(
+                        "hm_supp_header_debug %s",
+                        json.dumps(
+                            {
+                                "event": "hm_supp_header_debug",
+                                "request_id": request_id,
+                                "patch": patch,
+                                "header_before": hdr_before,
+                                "header_after": hdr,
+                                "has_embedded_text": bool(embedded_text),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                except Exception:
+                    pass
+                try:
+                    logger.info(
+                        "hm_supp_bom_debug %s",
+                        json.dumps(
+                            {
+                                "event": "hm_supp_bom_debug",
+                                "request_id": request_id,
+                                "has_bom_payload": bom_payload is not None,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     try:
         if str(os.getenv("DEBUG_SALES_ORDER_TRACE") or "").strip() in {"1", "true", "True", "YES", "yes"}:
