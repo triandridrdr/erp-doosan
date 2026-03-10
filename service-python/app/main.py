@@ -6360,6 +6360,116 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
     sales_order_payload = _build_sales_order_payload(combined_tables)
+
+    try:
+        joined_text = "\n".join([t for t in (combined_texts or []) if isinstance(t, str) and t.strip()]).strip()
+
+        def _is_hm_supplementary_text(t: str, fn: str) -> bool:
+            if re.search(r"Supplementary\s+Product\s+Information", str(fn or ""), flags=re.IGNORECASE) is not None:
+                return True
+            if re.search(r"\bSupplementary\s+Product\s+Information\b", str(t or ""), flags=re.IGNORECASE) is None:
+                return False
+            return True
+
+        def _hm_norm(s: str) -> str:
+            return re.sub(r"\s+", " ", str(s or "").strip())
+
+        def _grab_after_label(t: str, label: str) -> str:
+            txt = str(t or "")
+            if not txt.strip():
+                return ""
+            lines = [ln.strip() for ln in txt.replace("\r", "\n").split("\n")]
+            pat = re.compile(r"^\s*" + re.escape(label) + r"\s*[:\-]?\s*(.*)\s*$", flags=re.IGNORECASE)
+            for i, ln in enumerate(lines):
+                m = pat.match(ln)
+                if not m:
+                    continue
+                tail = _hm_norm(m.group(1) or "")
+                if tail:
+                    return tail
+                # next non-empty line
+                for j in range(i + 1, min(len(lines), i + 4)):
+                    nxt = _hm_norm(lines[j])
+                    if nxt:
+                        return nxt
+                return ""
+            return ""
+
+        def _looks_like_colour_code(v: str) -> bool:
+            ss = _hm_norm(v)
+            if not ss:
+                return False
+            return re.fullmatch(r"\d{2,6}\s*[-–—]\s*[A-Z][A-Z0-9\s/]{2,}", ss, flags=re.IGNORECASE) is not None
+
+        def _is_bad_hm_value(k: str, v: str) -> bool:
+            kk = str(k or "").strip().lower()
+            vv = _hm_norm(v)
+            if not vv:
+                return True
+            v_l = vv.lower()
+            if kk == "date":
+                if "season" in v_l or "supplier" in v_l or "order" in v_l:
+                    return True
+                if re.search(r"\b\d{4}-\d{2}-\d{2}\b", vv):
+                    return False
+                if re.search(r"\b\d{1,2}/\d{1,2}/\d{4}\b", vv):
+                    return False
+                if re.search(r"\b\d{1,2}\s+[A-Z]{3,9}\s+\d{4}\b", vv, flags=re.IGNORECASE):
+                    return False
+                return True
+            if kk == "supplier":
+                if v_l in {"send to", "sendto", "ship to", "shipto", "code"}:
+                    return True
+                return False
+            if kk == "article":
+                if _looks_like_colour_code(vv):
+                    return True
+                if re.search(r"\d", vv) is None:
+                    return True
+                if re.fullmatch(r"elastic|buckle|shell|trim", re.sub(r"[^a-z]", "", v_l)):
+                    return True
+                return False
+            if kk == "supplierref":
+                if re.fullmatch(r"\d{2,10}", re.sub(r"\s+", "", vv)):
+                    return False
+                return True
+            return False
+
+        if isinstance(sales_order_payload, dict) and _is_hm_supplementary_text(joined_text, filename):
+            patch: Dict[str, Any] = {}
+            order_no = _grab_after_label(joined_text, "Order No") or _grab_after_label(joined_text, "Order Nr")
+            if order_no:
+                patch["ordernr"] = order_no
+            date_of_order = _grab_after_label(joined_text, "Date of Order")
+            if date_of_order:
+                patch["date"] = date_of_order
+            supplier_code = _grab_after_label(joined_text, "Supplier Code")
+            if supplier_code:
+                patch["supplierref"] = supplier_code
+            supplier_name = _grab_after_label(joined_text, "Supplier Name")
+            if supplier_name:
+                patch["supplier"] = supplier_name
+            product_no = _grab_after_label(joined_text, "Product No")
+            if product_no:
+                patch["article"] = product_no
+            product_name = _grab_after_label(joined_text, "Product Name")
+            if product_name:
+                patch["description"] = product_name
+            season = _grab_after_label(joined_text, "Season")
+            if season:
+                patch["season"] = season
+
+            hdr = sales_order_payload.get("header") if isinstance(sales_order_payload.get("header"), dict) else {}
+            for k, v in patch.items():
+                vv = _hm_norm(str(v or ""))
+                if not vv:
+                    continue
+                cur = _hm_norm(str(hdr.get(k) or ""))
+                if (not cur) or _is_bad_hm_value(k, cur):
+                    hdr[k] = vv
+            sales_order_payload["header"] = hdr
+    except Exception:
+        pass
     bom_payload = None
     try:
         if build_bom_payload is not None:
