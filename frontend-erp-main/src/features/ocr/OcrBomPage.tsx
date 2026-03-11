@@ -1,7 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
+import { useState } from 'react';
 
 import { Button } from '../../components/ui/Button';
+import { Modal } from '../../components/ui/Modal';
 import { cn } from '../../lib/utils';
 import { ocrDraftApi } from './api';
 
@@ -17,6 +19,9 @@ export function OcrBomPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
 
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<DraftListItem | null>(null);
+
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['ocr-drafts'],
     queryFn: async () => {
@@ -30,6 +35,12 @@ export function OcrBomPage() {
     mutationFn: (id: number) => ocrDraftApi.delete(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['ocr-drafts'] });
+      setIsDeleteOpen(false);
+      setDeleteTarget(null);
+    },
+    onError: () => {
+      setIsDeleteOpen(false);
+      setDeleteTarget(null);
     },
   });
 
@@ -107,7 +118,7 @@ export function OcrBomPage() {
                   <td className='px-6 py-4 whitespace-nowrap'>
                     <div className='flex items-center gap-2'>
                       <Button
-                        className='h-8 px-3 text-sm'
+                        variant='outline'
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
@@ -117,14 +128,13 @@ export function OcrBomPage() {
                         Edit
                       </Button>
                       <Button
-                        className='h-8 px-3 text-sm bg-red-600 hover:bg-red-700'
+                        variant='danger'
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
                           if (isDeletePending) return;
-                          const ok = window.confirm(`Delete draft #${d.id}?`);
-                          if (!ok) return;
-                          deleteDraft(d.id);
+                          setDeleteTarget(d);
+                          setIsDeleteOpen(true);
                         }}
                         disabled={isDeletePending}
                       >
@@ -138,6 +148,42 @@ export function OcrBomPage() {
           </table>
         </div>
       </div>
+
+      <Modal
+        isOpen={isDeleteOpen}
+        onClose={() => {
+          setIsDeleteOpen(false);
+          setDeleteTarget(null);
+        }}
+        title='Delete draft'
+      >
+        <div className='space-y-6'>
+          <div className='text-sm text-gray-700'>Are you sure you want to delete draft #{deleteTarget?.id}?</div>
+          <div className='flex justify-end gap-2'>
+            <Button
+              variant='ghost'
+              onClick={() => {
+                setIsDeleteOpen(false);
+                setDeleteTarget(null);
+              }}
+              disabled={isDeletePending}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant='danger'
+              isLoading={isDeletePending}
+              disabled={!deleteTarget || isDeletePending}
+              onClick={() => {
+                if (!deleteTarget) return;
+                deleteDraft(deleteTarget.id);
+              }}
+            >
+              Delete
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

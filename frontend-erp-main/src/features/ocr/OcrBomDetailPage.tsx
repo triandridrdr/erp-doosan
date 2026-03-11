@@ -3,6 +3,9 @@ import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { Button } from '../../components/ui/Button';
+import { Input } from '../../components/ui/Input';
+import { Modal } from '../../components/ui/Modal';
+import { Textarea } from '../../components/ui/Textarea';
 import { ocrDraftApi } from './api';
 import { getAttachedBomMasterId } from './draftHelpers';
 
@@ -44,6 +47,10 @@ export function OcrBomDetailPage() {
   const [saveStatus, setSaveStatus] = useState<{ state: 'idle' | 'saving' | 'saved' | 'error'; message?: string }>({
     state: 'idle',
   });
+
+  const [isSuccessOpen, setIsSuccessOpen] = useState(false);
+  const [isErrorOpen, setIsErrorOpen] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
 
   const [draft, setDraft] = useState<DraftEditorPayload | null>(null);
 
@@ -102,12 +109,15 @@ export function OcrBomDetailPage() {
     onMutate: () => setSaveStatus({ state: 'saving' }),
     onSuccess: () => {
       setSaveStatus({ state: 'saved' });
+      setIsSuccessOpen(true);
       qc.invalidateQueries({ queryKey: ['ocr-drafts'] });
       qc.invalidateQueries({ queryKey: ['ocr-draft', id] });
     },
     onError: (err: any) => {
       const msg = err?.response?.data?.message || err?.message || 'Save failed';
       setSaveStatus({ state: 'error', message: String(msg) });
+      setErrorMessage(String(msg));
+      setIsErrorOpen(true);
     },
   });
 
@@ -158,8 +168,6 @@ export function OcrBomDetailPage() {
           <div className='text-sm text-gray-600'>Style Code: {styleCode || '-'}</div>
         </div>
         <div className='flex items-center gap-2'>
-          {saveStatus.state === 'error' && <div className='text-sm text-red-600'>{saveStatus.message}</div>}
-          {saveStatus.state === 'saved' && <div className='text-sm text-green-700'>Saved</div>}
           <Button variant='outline' onClick={() => navigate('/ocr-bom-master')}>
             Back
           </Button>
@@ -174,7 +182,7 @@ export function OcrBomDetailPage() {
           <div className='flex items-center justify-between gap-4'>
             <h3 className='font-semibold text-gray-900'>BILL OF MATERIALS (BOM DRAFT)</h3>
             <Button
-              className='h-9 px-3 text-sm'
+              size='sm'
               onClick={() => {
                 setDraft((cur) => {
                   if (!cur) return cur;
@@ -225,8 +233,8 @@ export function OcrBomDetailPage() {
               {draft.bomRows.map((r, idx) => (
                 <tr key={r.id}>
                   <td className='px-3 py-2 text-sm text-gray-700'>
-                    <input
-                      className='w-56 border border-gray-200 rounded px-2 py-1 text-sm'
+                    <Input
+                      className='w-56 h-9 px-2 py-1 text-sm rounded-lg'
                       value={r.component}
                       onChange={(e) => {
                         setDraft((cur) => {
@@ -239,8 +247,8 @@ export function OcrBomDetailPage() {
                     />
                   </td>
                   <td className='px-3 py-2 text-sm text-gray-700'>
-                    <input
-                      className='w-40 border border-gray-200 rounded px-2 py-1 text-sm'
+                    <Input
+                      className='w-40 h-9 px-2 py-1 text-sm rounded-lg'
                       value={r.category}
                       onChange={(e) => {
                         setDraft((cur) => {
@@ -253,8 +261,8 @@ export function OcrBomDetailPage() {
                     />
                   </td>
                   <td className='px-3 py-2 text-sm text-gray-900'>
-                    <textarea
-                      className='w-72 border border-gray-200 rounded px-2 py-1 text-sm'
+                    <Textarea
+                      className='w-72 px-2 py-1 text-sm rounded-lg'
                       rows={2}
                       value={r.composition}
                       onChange={(e) => {
@@ -268,8 +276,8 @@ export function OcrBomDetailPage() {
                     />
                   </td>
                   <td className='px-3 py-2 text-sm text-gray-700'>
-                    <input
-                      className='w-28 border border-gray-200 rounded px-2 py-1 text-sm'
+                    <Input
+                      className='w-28 h-9 px-2 py-1 text-sm rounded-lg'
                       value={r.uom}
                       onChange={(e) => {
                         setDraft((cur) => {
@@ -282,8 +290,8 @@ export function OcrBomDetailPage() {
                     />
                   </td>
                   <td className='px-3 py-2 text-sm text-gray-900'>
-                    <input
-                      className='w-44 border border-gray-200 rounded px-2 py-1 text-sm'
+                    <Input
+                      className='w-44 h-9 px-2 py-1 text-sm rounded-lg'
                       value={r.consumptionPerUnit}
                       onChange={(e) => {
                         setDraft((cur) => {
@@ -296,8 +304,8 @@ export function OcrBomDetailPage() {
                     />
                   </td>
                   <td className='px-3 py-2 text-sm text-gray-900'>
-                    <input
-                      className='w-28 border border-gray-200 rounded px-2 py-1 text-sm'
+                    <Input
+                      className='w-28 h-9 px-2 py-1 text-sm rounded-lg'
                       value={r.wastePercent}
                       onChange={(e) => {
                         setDraft((cur) => {
@@ -311,7 +319,8 @@ export function OcrBomDetailPage() {
                   </td>
                   <td className='px-3 py-2 text-sm text-gray-700'>
                     <Button
-                      className='h-8 px-3 text-sm bg-red-600 hover:bg-red-700'
+                      variant='danger'
+                      size='sm'
                       onClick={() => {
                         setDraft((cur) => {
                           if (!cur) return cur;
@@ -328,6 +337,50 @@ export function OcrBomDetailPage() {
           </table>
         </div>
       </div>
+
+      <Modal
+        isOpen={isSuccessOpen}
+        onClose={() => {
+          setIsSuccessOpen(false);
+        }}
+        title='Success'
+      >
+        <div className='space-y-6'>
+          <div className='text-sm text-gray-700'>BoM draft berhasil disimpan.</div>
+          <div className='flex justify-end gap-2'>
+            <Button
+              onClick={() => {
+                setIsSuccessOpen(false);
+              }}
+            >
+              OK
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={isErrorOpen}
+        onClose={() => {
+          setIsErrorOpen(false);
+          setErrorMessage('');
+        }}
+        title='Error'
+      >
+        <div className='space-y-6'>
+          <div className='text-sm text-red-600'>{errorMessage || saveStatus.message || 'Save failed'}</div>
+          <div className='flex justify-end gap-2'>
+            <Button
+              onClick={() => {
+                setIsErrorOpen(false);
+                setErrorMessage('');
+              }}
+            >
+              OK
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
