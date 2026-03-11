@@ -8,6 +8,7 @@ import { AlertCircle, FileText, Loader2, Table as TableIcon, Type, Upload } from
 import { useEffect, useMemo, useState } from 'react';
 
 import { Button } from '../../components/ui/Button';
+import { Modal } from '../../components/ui/Modal';
 import { ocrDraftApi, ocrPythonApi } from './api';
 import { styleApi } from '../style/api';
 import type {
@@ -417,6 +418,8 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   const [saveStatus, setSaveStatus] = useState<{ state: 'idle' | 'saving' | 'saved' | 'error'; id?: number; message?: string }>({
     state: 'idle',
   });
+  const [isSaveSuccessOpen, setIsSaveSuccessOpen] = useState(false);
+  const [saveSuccessMessage, setSaveSuccessMessage] = useState('');
 
   const [isAttachOpen, setIsAttachOpen] = useState(false);
   const [attachStyleSearch, setAttachStyleSearch] = useState('');
@@ -567,10 +570,12 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
       const id = res?.data?.id ?? res?.data?.data?.id ?? res?.id ?? res?.data;
       if (typeof id === 'number') {
         setSaveStatus({ state: 'saved', id });
-        window.alert(`SO id ${id} saved`);
+        setSaveSuccessMessage(`SO id ${id} saved`);
+        setIsSaveSuccessOpen(true);
       } else {
         setSaveStatus({ state: 'saved' });
-        window.alert('SO saved');
+        setSaveSuccessMessage('SO saved');
+        setIsSaveSuccessOpen(true);
       }
     },
     onError: (err: any) => {
@@ -781,38 +786,47 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   };
 
   return (
-    <div className='space-y-8 max-w-screen-2xl mx-auto pb-20'>
-      <div className='flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4'>
-        <h1 className='text-2xl font-bold text-gray-900'>OCR Document Analysis</h1>
-
-        {/* 모드 선택 탭 */}
-        <div className='bg-gray-100 p-1 rounded-lg flex'>
-          <button
-            onClick={() => handleModeChange('extract')}
-            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
-              mode === 'extract' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'
-            }`}
-          >
-            <span className='flex items-center'>
-              <Type className='w-4 h-4 mr-2' />
-              Simple Text
-            </span>
-          </button>
-          <button
-            onClick={() => handleModeChange('analyze')}
-            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
-              mode === 'analyze' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-900'
-            }`}
-          >
-            <span className='flex items-center'>
-              <TableIcon className='w-4 h-4 mr-2' />
-              Table / Document Analysis
-            </span>
-          </button>
+    <div className='min-h-screen bg-gray-50'>
+      <Modal isOpen={isSaveSuccessOpen} onClose={() => setIsSaveSuccessOpen(false)} title='Success'>
+        <div className='space-y-6'>
+          <div className='text-sm text-gray-700'>{saveSuccessMessage}</div>
+          <div className='flex justify-end gap-2'>
+            <Button onClick={() => setIsSaveSuccessOpen(false)}>OK</Button>
+          </div>
         </div>
-      </div>
+      </Modal>
 
-      <div className='flex flex-col gap-8'>
+      <div className='max-w-6xl mx-auto px-4 py-8'>
+        <div className='flex flex-col space-y-8'>
+          <div className='flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4'>
+            <h1 className='text-3xl font-bold text-gray-900'>OCR with Python</h1>
+            <div className='inline-flex rounded-lg border border-gray-200 bg-gray-100 p-1'>
+              <button
+                onClick={() => handleModeChange('extract')}
+                className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                  mode === 'extract' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'
+                }`}
+              >
+                <span className='flex items-center'>
+                  <Type className='w-4 h-4 mr-2' />
+                  Simple Text
+                </span>
+              </button>
+              <button
+                onClick={() => handleModeChange('analyze')}
+                className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                  mode === 'analyze' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-900'
+                }`}
+              >
+                <span className='flex items-center'>
+                  <TableIcon className='w-4 h-4 mr-2' />
+                  Table / Document Analysis
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div className='flex flex-col gap-8'>
         {/* 상단: 파일 업로드 및 미리보기 섹션 */}
         <div className='bg-white p-6 rounded-lg shadow-sm border border-gray-200'>
           <h2 className='text-lg font-semibold text-gray-900 mb-4 flex items-center'>
@@ -1742,15 +1756,18 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                             </details>
                           </>
                         )}
-                      </>
+                      </> 
                     );
                   })()}
-                </div>
-              )}
-            </div>
-          )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
+    </div>
   );
+
 }
