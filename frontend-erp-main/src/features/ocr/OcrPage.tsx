@@ -400,6 +400,8 @@ type OcrMode = 'extract' | 'analyze';
 type OcrApiClient = {
   extract: (file: File) => Promise<OcrResponse>;
   analyze: (file: File) => Promise<DocumentAnalysisResponse>;
+  extractBatch?: (files: File[]) => Promise<OcrResponse[]>;
+  analyzeBatch?: (files: File[]) => Promise<DocumentAnalysisResponse[]>;
 };
 
 type OcrPageProps = {
@@ -408,7 +410,8 @@ type OcrPageProps = {
 
 export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   const [mode, setMode] = useState<OcrMode>('extract'); // 현재 선택된 모드
-  const [selectedFile, setSelectedFile] = useState<File | null>(null); // 업로드된 파일
+  const [selectedFile, setSelectedFile] = useState<File | null>(null); // 업로드된 파일 (single-file compatibility)
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]); // 업로드된 파일들 (batch)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null); // 이미지 미리보기 URL
   const [erpDraft, setErpDraft] = useState<ErpDraft | null>(null);
   const [saveStatus, setSaveStatus] = useState<{ state: 'idle' | 'saving' | 'saved' | 'error'; id?: number; message?: string }>({
@@ -504,6 +507,21 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
     mutationFn: api.extract,
   });
 
+  const {
+    mutate: extractTextBatch,
+    isPending: isExtractBatchPending,
+    data: extractBatchResult,
+    error: extractBatchError,
+    reset: resetExtractBatch,
+  } = useMutation({
+    mutationFn: async (files: File[]) => {
+      if (!api.extractBatch) {
+        throw new Error('Batch extract is not supported');
+      }
+      return api.extractBatch(files);
+    },
+  });
+
   // 문서 분석 Mutation
   const {
     mutate: analyzeDoc,
@@ -515,7 +533,30 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
     mutationFn: api.analyze,
   });
 
-  const isPending = isExtractPending || isAnalyzePending;
+  const {
+    mutate: analyzeDocBatch,
+    isPending: isAnalyzeBatchPending,
+    data: analyzeBatchResult,
+    error: analyzeBatchError,
+    reset: resetAnalyzeBatch,
+  } = useMutation({
+    mutationFn: async (files: File[]) => {
+      if (!api.analyzeBatch) {
+        throw new Error('Batch analyze is not supported');
+      }
+      return api.analyzeBatch(files);
+    },
+  });
+
+  const isPending = isExtractPending || isAnalyzePending || isExtractBatchPending || isAnalyzeBatchPending;
+
+  const isBatchMode = selectedFiles.length > 1;
+
+  // For now, batch view shows a summary list and uses the first result for detailed rendering.
+  const effectiveExtractResult = extractResult ?? (extractBatchResult && extractBatchResult.length ? extractBatchResult[0] : undefined);
+  const effectiveExtractError = extractError ?? extractBatchError;
+  const effectiveAnalyzeResult = analyzeResult ?? (analyzeBatchResult && analyzeBatchResult.length ? analyzeBatchResult[0] : undefined);
+  const effectiveAnalyzeError = analyzeError ?? analyzeBatchError;
 
   const { mutate: saveDraft, isPending: isSavePending } = useMutation({
     mutationFn: ocrDraftApi.save,
@@ -539,9 +580,9 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   });
 
   const salesOrderPayload = useMemo(() => {
-    const p = extractResult?.data?.salesOrderPayload;
+    const p = effectiveExtractResult?.data?.salesOrderPayload;
     return p && typeof p === 'object' ? (p as SalesOrderPayload) : null;
-  }, [extractResult?.data?.salesOrderPayload]);
+  }, [effectiveExtractResult?.data?.salesOrderPayload]);
 
   useEffect(() => {
     if (!salesOrderPayload) {
@@ -561,29 +602,57 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
     // 모드 변경 시 이전 결과 초기화
     if (newMode === 'extract') resetAnalyze();
     else resetExtract();
+
+    try {
+      resetExtractBatch();
+      resetAnalyzeBatch();
+    } catch {
+      // ignore
+    }
   };
 
   // 파일 선택 핸들러
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setSelectedFile(file);
-      setPreviewUrl(URL.createObjectURL(file)); // 미리보기 URL 생성
-      // 파일 변경 시 이전 결과 초기화
-      resetExtract();
-      resetAnalyze();
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    if (!files.length) return;
+
+    // Keep both single + batch state for compatibility.
+    setSelectedFiles(files);
+    setSelectedFile(files[0]);
+    setPreviewUrl(URL.createObjectURL(files[0]));
+
+    // 파일 변경 시 이전 결과 초기화
+    resetExtract();
+    resetAnalyze();
+    try {
+      resetExtractBatch();
+      resetAnalyzeBatch();
+    } catch {
+      // ignore
     }
   };
 
   // 처리 시작 핸들러
   const handleProcess = () => {
-    if (selectedFile) {
-      setSaveStatus({ state: 'idle' });
+    const files = selectedFiles.length ? selectedFiles : selectedFile ? [selectedFile] : [];
+    if (!files.length) return;
+
+    setSaveStatus({ state: 'idle' });
+    // Multi-file path: use batch endpoints.
+    if (files.length > 1) {
       if (mode === 'extract') {
-        extractText(selectedFile);
+        extractTextBatch(files);
       } else {
-        analyzeDoc(selectedFile);
+        analyzeDocBatch(files);
       }
+      return;
+    }
+
+    // Single-file path.
+    if (mode === 'extract') {
+      extractText(files[0]);
+    } else {
+      analyzeDoc(files[0]);
     }
   };
 
@@ -758,9 +827,15 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                 <input
                   type='file'
                   accept='image/*,application/pdf'
+                  multiple
                   onChange={handleFileChange}
                   className='absolute inset-0 w-full h-full opacity-0 cursor-pointer'
                 />
+                {selectedFiles.length > 1 && (
+                  <div className='absolute top-3 left-3 text-xs font-medium text-gray-600 bg-white/80 border border-gray-200 rounded px-2 py-1'>
+                    {selectedFiles.length} files selected
+                  </div>
+                )}
                 {!selectedFile ? (
                   <div className='text-center text-gray-500'>
                     <FileText className='w-12 h-12 mx-auto mb-3 text-gray-400' />
@@ -829,56 +904,103 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
         <div>
           {/* Analyze 모드 결과 */}
           {mode === 'analyze' && (
-            <div className={`transition-all duration-500 ${analyzeResult ? 'opacity-100' : 'opacity-0'}`}>
-              {analyzeResult?.data && (
+            <div className={`transition-all duration-500 ${effectiveAnalyzeResult ? 'opacity-100' : 'opacity-0'}`}>
+              {isBatchMode && analyzeBatchResult && analyzeBatchResult.length > 0 && (
+                <div className='bg-gray-50 p-4 rounded-lg border border-gray-200 mb-6'>
+                  <div className='text-sm font-semibold text-gray-900'>Batch summary</div>
+                  <div className='text-xs text-gray-600 mt-1'>Showing details for the first file.</div>
+                  <div className='mt-3 space-y-2'>
+                    {selectedFiles.map((f, idx) => {
+                      const r = analyzeBatchResult[idx];
+                      const ok = !!r && (r as any).success === true;
+                      return (
+                        <div key={`${f.name}_${idx}`} className='flex items-center justify-between text-sm'>
+                          <div className='truncate pr-3 text-gray-700'>{f.name}</div>
+                          <div className={ok ? 'text-green-700 font-medium' : 'text-red-600 font-medium'}>{ok ? 'OK' : 'ERROR'}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {effectiveAnalyzeError && (
+                <div className='bg-red-50 p-4 rounded-lg border border-red-200 text-red-700 mb-6'>
+                  <p className='font-medium'>Error</p>
+                  <p className='text-sm mt-1'>{(effectiveAnalyzeError as any)?.message || 'Failed to analyze document.'}</p>
+                </div>
+              )}
+
+              {effectiveAnalyzeResult?.data && (
                 <div className='bg-white p-8 rounded-lg shadow-sm border border-gray-200'>
                   <div className='flex items-center justify-between mb-6'>
                     <h2 className='text-xl font-bold text-gray-900 flex items-center'>
-                      <TableIcon className='w-6 h-6 mr-3 text-indigo-600' />
-                      Analysis results
+                      <TableIcon className='w-6 h-6 mr-2 text-indigo-600' />
+                      Document Analysis Results
                     </h2>
                     <span className='text-sm font-medium text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-100'>
                       Average confidence:{' '}
-                      {typeof analyzeResult.data.averageConfidence === 'number' && Number.isFinite(analyzeResult.data.averageConfidence)
-                        ? `${analyzeResult.data.averageConfidence.toFixed(1)}%`
+                      {typeof effectiveAnalyzeResult.data.averageConfidence === 'number' &&
+                      Number.isFinite(effectiveAnalyzeResult.data.averageConfidence)
+                        ? `${effectiveAnalyzeResult.data.averageConfidence.toFixed(1)}%`
                         : '-'}
                     </span>
                   </div>
 
-                  {renderAnalysisResult(analyzeResult.data)}
+                  {renderAnalysisResult(effectiveAnalyzeResult.data)}
                 </div>
               )}
             </div>
           )}
 
           {/* Extract 모드 결과 */}
-          {mode === 'extract' && (extractResult || isExtractPending) && (
+          {mode === 'extract' && (effectiveExtractResult || isExtractPending || isExtractBatchPending) && (
             <div className='bg-white p-6 rounded-lg shadow-sm border border-gray-200 min-h-150'>
               <h2 className='text-lg font-semibold text-gray-900 mb-4 flex items-center'>
                 <FileText className='w-5 h-5 mr-2' />
-                Extraction result (simple text)
+                Extract Result
               </h2>
 
-              {isPending && (
-                <div className='flex flex-col items-center justify-center h-64 text-gray-500'>
-                  <Loader2 className='w-8 h-8 animate-spin mb-4 text-indigo-500' />
-                  <p>Analyzing text...</p>
+              {effectiveExtractError && (
+                <div className='bg-red-50 p-4 rounded-lg border border-red-200 text-red-700'>
+                  <p className='font-medium'>Error</p>
+                  <p className='text-sm mt-1'>{(effectiveExtractError as any)?.message || 'Failed to extract text.'}</p>
                 </div>
               )}
 
-              {extractResult && extractResult.success && (
+              {isBatchMode && extractBatchResult && extractBatchResult.length > 0 && (
+                <div className='bg-gray-50 p-4 rounded-lg border border-gray-200'>
+                  <div className='text-sm font-semibold text-gray-900'>Batch summary</div>
+                  <div className='text-xs text-gray-600 mt-1'>Showing details for the first file.</div>
+                  <div className='mt-3 space-y-2'>
+                    {selectedFiles.map((f, idx) => {
+                      const r = extractBatchResult[idx];
+                      const ok = !!r && (r as any).success === true;
+                      return (
+                        <div key={`${f.name}_${idx}`} className='flex items-center justify-between text-sm'>
+                          <div className='truncate pr-3 text-gray-700'>{f.name}</div>
+                          <div className={ok ? 'text-green-700 font-medium' : 'text-red-600 font-medium'}>{ok ? 'OK' : 'ERROR'}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {effectiveExtractResult && effectiveExtractResult.success && (
                 <div className='space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500'>
                   <div className='bg-indigo-50 p-4 rounded-lg flex items-center justify-between'>
                     <span className='text-sm font-medium text-indigo-900'>Average confidence</span>
                     <span className='text-lg font-bold text-indigo-600'>
-                      {typeof extractResult.data.averageConfidence === 'number' && Number.isFinite(extractResult.data.averageConfidence)
-                        ? `${extractResult.data.averageConfidence.toFixed(1)}%`
+                      {typeof effectiveExtractResult.data.averageConfidence === 'number' &&
+                      Number.isFinite(effectiveExtractResult.data.averageConfidence)
+                        ? `${effectiveExtractResult.data.averageConfidence.toFixed(1)}%`
                         : '-'}
                     </span>
                   </div>
 
                   {(() => {
-                    const hasSalesOrderPayload = !!extractResult.data.salesOrderPayload;
+                    const hasSalesOrderPayload = !!effectiveExtractResult.data.salesOrderPayload;
                     return (
                       <>
                         {hasSalesOrderPayload && erpDraft && (
@@ -1527,20 +1649,20 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                             <div>
                               <h3 className='text-sm font-medium text-gray-700 mb-2'>Full text</h3>
                               <div className='bg-gray-50 p-4 rounded-lg text-sm text-gray-800 whitespace-pre-wrap border border-gray-100 max-h-96 overflow-y-auto font-mono'>
-                                {extractResult.data.extractedText}
+                                {effectiveExtractResult.data.extractedText}
                               </div>
                             </div>
 
-                            {extractResult.data.tables && (
+                            {effectiveExtractResult.data.tables && (
                               <div className='space-y-6'>
-                                {extractResult.data.tables && extractResult.data.tables.length > 0 && (
+                                {effectiveExtractResult.data.tables && effectiveExtractResult.data.tables.length > 0 && (
                                   <div className='space-y-4'>
                                     <h3 className='font-bold text-lg text-gray-900 flex items-center'>
                                       <TableIcon className='w-5 h-5 mr-2' />
-                                      AI Tables ({extractResult.data.tables.length})
+                                      AI Tables ({effectiveExtractResult.data.tables.length})
                                     </h3>
                                     <div className='grid grid-cols-1 gap-6'>
-                                      {extractResult.data.tables.map((table: TableDto, idx: number) => (
+                                      {effectiveExtractResult.data.tables.map((table: TableDto, idx: number) => (
                                         <div
                                           key={idx}
                                           className='bg-white rounded-lg border border-gray-200 overflow-hidden shadow-sm'
@@ -1579,13 +1701,24 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                             {/* 블록 상세 보기 */}
                             <details className='group'>
                               <summary className='text-sm font-medium text-gray-700 cursor-pointer mb-2 list-none flex items-center'>
-                                <span>Detected blocks ({extractResult.data.blocks.length}) - view details</span>
+                                <span>Detected blocks ({effectiveExtractResult.data.blocks.length}) - view details</span>
                                 <span className='ml-2 transition group-open:rotate-180 text-gray-400'>▼</span>
                               </summary>
 
                               <div className='border border-gray-200 rounded-lg overflow-hidden mt-2'>
                                 <div className='max-h-60 overflow-y-auto divide-y divide-gray-100'>
-                                  {extractResult.data.blocks.map((block, index) => (
+                                  {effectiveExtractResult.data.blocks.map((block, index) => {
+                                    const conf = typeof block.confidence === 'number' ? block.confidence : null;
+                                    const confLabel = conf === null ? '-' : `${conf.toFixed(1)}%`;
+                                    const confClass =
+                                      conf === null
+                                        ? 'text-gray-500'
+                                        : conf > 90
+                                          ? 'text-green-600'
+                                          : conf > 70
+                                            ? 'text-yellow-600'
+                                            : 'text-red-600';
+                                    return (
                                     <div
                                       key={index}
                                       className='p-3 hover:bg-gray-50 transition-colors flex justify-between items-start'
@@ -1596,19 +1729,14 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                           {block.blockType}
                                         </span>
                                         <span
-                                          className={`text-xs mt-1 ${
-                                            block.confidence > 90
-                                              ? 'text-green-600'
-                                              : block.confidence > 70
-                                                ? 'text-yellow-600'
-                                                : 'text-red-600'
-                                          }`}
+                                          className={`text-xs mt-1 ${confClass}`}
                                         >
-                                          {block.confidence.toFixed(1)}%
+                                          {confLabel}
                                         </span>
                                       </div>
                                     </div>
-                                  ))}
+                                    );
+                                  })}
                                 </div>
                               </div>
                             </details>

@@ -3,6 +3,7 @@
  * @description OCR(광학 문자 인식) 관련 API 요청 함수를 정의합니다.
  */
 import { client } from '../../api/client';
+import type { ApiResponse } from '../../types';
 import type { DocumentAnalysisResponse, OcrResponse } from './types';
 
 export const ocrApi = {
@@ -23,6 +24,20 @@ export const ocrApi = {
     return response.data;
   },
 
+  extractBatch: async (files: File[]) => {
+    const formData = new FormData();
+    for (const f of files || []) {
+      formData.append('files', f);
+    }
+
+    const response = await client.post<ApiResponse<OcrResponse[]>>('/api/v1/ocr/python/extract/batch?view=json', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data.data;
+  },
+
   /**
    * 문서 분석 (Analyze) API 호출
    * 이미지를 업로드하여 텍스트뿐만 아니라 테이블, 키-값 쌍(Form Data) 등을 구조화하여 추출합니다.
@@ -38,6 +53,20 @@ export const ocrApi = {
       },
     });
     return response.data;
+  },
+
+  analyzeBatch: async (files: File[]) => {
+    const formData = new FormData();
+    for (const f of files || []) {
+      formData.append('files', f);
+    }
+
+    const response = await client.post<ApiResponse<DocumentAnalysisResponse[]>>('/api/v1/ocr/python/analyze/batch', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data.data;
   },
 };
 

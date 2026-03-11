@@ -114,6 +114,17 @@ public class OcrService {
         }
     }
 
+    public List<OcrResponse> extractTextWithPythonBatch(List<MultipartFile> files) {
+        if (files == null || files.isEmpty()) {
+            return List.of();
+        }
+        List<OcrResponse> out = new ArrayList<>();
+        for (MultipartFile f : files) {
+            out.add(extractTextWithPython(f));
+        }
+        return out;
+    }
+
     public OcrResponse extractTextWithPython(MultipartFile file) {
         validateFile(file);
 
@@ -513,6 +524,17 @@ public class OcrService {
             log.error("OCR 호출 실패: {}", e.getMessage());
             throw new BusinessException(ErrorCode.OCR_PROCESSING_FAILED, e);
         }
+    }
+
+    public List<DocumentAnalysisResponse> analyzeDocumentWithPythonBatch(List<MultipartFile> files) {
+        if (files == null || files.isEmpty()) {
+            return List.of();
+        }
+        List<DocumentAnalysisResponse> out = new ArrayList<>();
+        for (MultipartFile f : files) {
+            out.add(analyzeDocumentWithPython(f));
+        }
+        return out;
     }
 
     private DocumentAnalysisResponse buildDocumentAnalysisResponseFromPython(PythonOcrExtractResponse response) {

@@ -17,6 +17,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.List;
+
 /**
  * OCR API 컨트롤러
  *
@@ -74,6 +76,14 @@ public class OcrController {
         return ResponseEntity.ok(ApiResponse.success(response, "텍스트 추출이 완료되었습니다"));
     }
 
+    @PostMapping(value = "/python/extract/batch", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ApiResponse<List<OcrResponse>>> extractTextWithPythonBatch(
+            @RequestParam("files") List<MultipartFile> files
+    ) {
+        List<OcrResponse> response = ocrService.extractTextWithPythonBatch(files);
+        return ResponseEntity.ok(ApiResponse.success(response, "텍스트 추출이 완료되었습니다"));
+    }
+
     /**
      * 문서 분석 API (테이블/폼 추출)
      *
@@ -120,6 +130,14 @@ public class OcrController {
             @RequestParam("file") MultipartFile file
     ) {
         DocumentAnalysisResponse response = ocrService.analyzeDocumentWithPython(file);
+        return ResponseEntity.ok(ApiResponse.success(response, "문서 분석이 완료되었습니다"));
+    }
+
+    @PostMapping(value = "/python/analyze/batch", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ApiResponse<List<DocumentAnalysisResponse>>> analyzeDocumentWithPythonBatch(
+            @RequestParam("files") List<MultipartFile> files
+    ) {
+        List<DocumentAnalysisResponse> response = ocrService.analyzeDocumentWithPythonBatch(files);
         return ResponseEntity.ok(ApiResponse.success(response, "문서 분석이 완료되었습니다"));
     }
 }
