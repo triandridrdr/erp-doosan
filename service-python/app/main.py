@@ -57,6 +57,21 @@ try:
 except Exception:  # pragma: no cover
     tabula = None
 
+try:
+    import camelot
+except Exception:  # pragma: no cover
+    camelot = None
+
+try:
+    import spacy
+except Exception:  # pragma: no cover
+    spacy = None
+
+try:
+    from transformers import pipeline
+except Exception:  # pragma: no cover
+    pipeline = None
+
 
 logger = logging.getLogger("python_ocr")
 if not logger.handlers:
@@ -113,6 +128,59 @@ except Exception:
     pass
 
 app = FastAPI(title="Python OCR Service", version="0.1.0")
+
+
+_SPACY_NLP = None
+_HF_NER = None
+
+
+def _env_flag(name: str) -> bool:
+    try:
+        return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return False
+
+
+def _get_spacy_nlp():
+    global _SPACY_NLP
+    if _SPACY_NLP is not None:
+        return _SPACY_NLP
+    if spacy is None:
+        _SPACY_NLP = None
+        return None
+    model = str(os.environ.get("SO_SPACY_MODEL") or "").strip()
+    if not model:
+        _SPACY_NLP = None
+        return None
+    try:
+        _SPACY_NLP = spacy.load(model)
+    except Exception:
+        _SPACY_NLP = None
+    return _SPACY_NLP
+
+
+def _get_hf_ner():
+    global _HF_NER
+    if _HF_NER is not None:
+        return _HF_NER
+    if pipeline is None:
+        _HF_NER = None
+        return None
+    model = str(os.environ.get("SO_HF_NER_MODEL") or "").strip()
+    if not model:
+        _HF_NER = None
+        return None
+    try:
+        _HF_NER = pipeline(
+            "ner",
+            model=model,
+            tokenizer=model,
+            aggregation_strategy="simple",
+            local_files_only=True,
+        )
+    except Exception:
+        _HF_NER = None
+    return _HF_NER
 
 try:
     from celery.result import AsyncResult
@@ -244,6 +312,7 @@ def _pdf_tables_pages_tabula(file_bytes: bytes, page_count: int) -> Optional[Lis
                 return ""
         except Exception:
             pass
+
         return str(v).strip()
 
     def _looks_like_header_row(row: List[str]) -> bool:
@@ -352,6 +421,245 @@ def _pdf_tables_pages_tabula(file_bytes: bytes, page_count: int) -> Optional[Lis
                     if isinstance(t, dict) and t.get("headers") and t.get("rows"):
                         page_tables.append(t)
             out.append(page_tables)
+        return out
+    except Exception:
+        return None
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+def _pdf_tables_pages(file_bytes: bytes, page_count: int) -> Optional[List[List[Dict[str, Any]]]]:
+    out = _pdf_tables_pages_tabula(file_bytes, page_count)
+    if out is not None:
+        try:
+            if _env_flag("SO_CAMELOT_FALLBACK_ON_EMPTY"):
+                has_any = any((isinstance(p, list) and len(p) > 0) for p in (out or []))
+                if not has_any:
+                    out2 = _pdf_tables_pages_camelot(file_bytes, page_count)
+                    if out2 is not None:
+                        return out2
+        except Exception:
+            pass
+        return out
+    return _pdf_tables_pages_camelot(file_bytes, page_count)
+
+
+def _pdf_tables_pages_camelot(file_bytes: bytes, page_count: int) -> Optional[List[List[Dict[str, Any]]]]:
+    if camelot is None:
+        return None
+
+    if page_count <= 0:
+        return []
+
+    def _cell_str(v: Any) -> str:
+        if v is None:
+            return ""
+        try:
+            if isinstance(v, float) and np.isnan(v):
+                return ""
+        except Exception:
+            pass
+        return str(v).strip()
+
+    def _looks_like_header_row(row: List[str]) -> bool:
+        if not row:
+            return False
+        joined = " ".join([c for c in row if c]).strip()
+        if not joined:
+            return False
+        alpha = len(re.findall(r"[A-Z]", joined.upper()))
+        digits = len(re.findall(r"\d", joined))
+        return alpha >= 3 and alpha >= digits
+
+    def _df_to_table(df: Any) -> Optional[Dict[str, Any]]:
+        try:
+            values = df.values.tolist()
+        except Exception:
+            return None
+        if not isinstance(values, list) or not values:
+            return None
+
+        rm: List[List[str]] = []
+        for r in values:
+            if not isinstance(r, list):
+                continue
+            rr = [_cell_str(c) for c in r]
+            if any(c.strip() for c in rr):
+                rm.append(rr)
+        if not rm:
+            return None
+
+        cols = max((len(r) for r in rm), default=0)
+        if cols <= 0:
+            return None
+        rm = [r + [""] * (cols - len(r)) for r in rm]
+
+        headers: List[str]
+        start_idx = 0
+        if _looks_like_header_row(rm[0]):
+            headers = [c if c else f"COL_{i+1}" for i, c in enumerate(rm[0])]
+            start_idx = 1
+        else:
+            headers = [f"COL_{i+1}" for i in range(cols)]
+
+        rows: List[Dict[str, Any]] = []
+        for r in rm[start_idx:]:
+            row_obj: Dict[str, Any] = {}
+            for i, h in enumerate(headers):
+                if i < len(r):
+                    row_obj[h] = r[i]
+            if any(str(v or "").strip() for v in row_obj.values()):
+                rows.append(row_obj)
+
+        if not rows:
+            return None
+        return {"headers": headers, "rows": rows}
+
+    tmp_path: Optional[str] = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(file_bytes)
+                f.flush()
+        except Exception:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            raise
+
+        def _env_int(name: str, default: Optional[int] = None) -> Optional[int]:
+            try:
+                s = str(os.environ.get(name) or "").strip()
+                if not s:
+                    return default
+                return int(float(s))
+            except Exception:
+                return default
+
+        def _env_float(name: str, default: Optional[float] = None) -> Optional[float]:
+            try:
+                s = str(os.environ.get(name) or "").strip()
+                if not s:
+                    return default
+                return float(s)
+            except Exception:
+                return default
+
+        def _env_str(name: str, default: str = "") -> str:
+            try:
+                return str(os.environ.get(name) or default)
+            except Exception:
+                return default
+
+        def _env_bool(name: str, default: bool = False) -> bool:
+            try:
+                v = os.environ.get(name)
+                if v is None:
+                    return default
+                return str(v).strip().lower() in {"1", "true", "yes", "on"}
+            except Exception:
+                return default
+
+        so_dbg_tables = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+        flavor_cfg = _env_str("SO_CAMELOT_FLAVOR", "auto").strip().lower() or "auto"
+        flavors: List[str]
+        if flavor_cfg in {"lattice", "stream"}:
+            flavors = [flavor_cfg]
+        else:
+            flavors = ["lattice", "stream"]
+
+        strip_text = _env_str("SO_CAMELOT_STRIP_TEXT", "")
+        line_scale = _env_int("SO_CAMELOT_LINE_SCALE", None)
+        process_background = _env_bool("SO_CAMELOT_PROCESS_BACKGROUND", False)
+        edge_tol = _env_float("SO_CAMELOT_EDGE_TOL", None)
+        row_tol = _env_int("SO_CAMELOT_ROW_TOL", None)
+        column_tol = _env_int("SO_CAMELOT_COLUMN_TOL", None)
+
+        out: List[List[Dict[str, Any]]] = []
+        for p in range(1, page_count + 1):
+            tables = None
+            used_flavor = None
+            last_err = None
+            for flv in flavors:
+                try:
+                    kwargs: Dict[str, Any] = {"pages": str(p), "flavor": flv}
+                    if strip_text:
+                        kwargs["strip_text"] = strip_text
+                    if line_scale is not None:
+                        kwargs["line_scale"] = line_scale
+                    if process_background:
+                        kwargs["process_background"] = True
+                    if edge_tol is not None:
+                        kwargs["edge_tol"] = edge_tol
+                    if row_tol is not None:
+                        kwargs["row_tol"] = row_tol
+                    if column_tol is not None:
+                        kwargs["column_tol"] = column_tol
+
+                    tables = camelot.read_pdf(tmp_path, **kwargs)
+                    used_flavor = flv
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    continue
+
+            if tables is None:
+                try:
+                    if so_dbg_tables:
+                        logger.info(
+                            "so_pdf_camelot_read_pdf_failed %s",
+                            json.dumps(
+                                {
+                                    "event": "so_pdf_camelot_read_pdf_failed",
+                                    "page": p,
+                                    "error": str(last_err) if last_err is not None else "unknown",
+                                    "flavors": flavors,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                except Exception:
+                    pass
+                out.append([])
+                continue
+
+            page_tables: List[Dict[str, Any]] = []
+            try:
+                for t in (tables or []):
+                    df = getattr(t, "df", None)
+                    tt = _df_to_table(df)
+                    if isinstance(tt, dict) and tt.get("headers") and tt.get("rows"):
+                        page_tables.append(tt)
+            except Exception:
+                pass
+
+            try:
+                if so_dbg_tables:
+                    logger.info(
+                        "so_pdf_camelot_tables %s",
+                        json.dumps(
+                            {
+                                "event": "so_pdf_camelot_tables",
+                                "page": p,
+                                "flavor": used_flavor,
+                                "table_count": len(page_tables),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+            except Exception:
+                pass
+
+            out.append(page_tables)
+
         return out
     except Exception:
         return None
@@ -5536,6 +5844,57 @@ def _extract_fields_smart(text: str, tables: List[Dict[str, Any]]) -> Dict[str, 
         except Exception:
             pass
 
+    if _env_flag("SO_ENABLE_SPACY") or _env_flag("SO_ENABLE_HF_NER"):
+        try:
+            if isinstance(text, str) and text.strip() and isinstance(merged, dict):
+                if _env_flag("SO_ENABLE_SPACY"):
+                    nlp = _get_spacy_nlp()
+                    if nlp is not None:
+                        doc = nlp(text)
+                        orgs = [str(e.text or "").strip() for e in (doc.ents or []) if getattr(e, "label_", "") == "ORG"]
+                        dates = [str(e.text or "").strip() for e in (doc.ents or []) if getattr(e, "label_", "") == "DATE"]
+                        if _field_bad("supplier", merged.get("supplier")) and orgs:
+                            cand = max(orgs, key=lambda s: len(s or ""))
+                            cand2 = " ".join((cand or "").split()).strip()
+                            if cand2 and len(cand2) >= 3:
+                                merged["supplier"] = cand2
+                        if _field_bad("date", merged.get("date")) and dates:
+                            blob = " ".join(dates)
+                            m = re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", blob)
+                            if m:
+                                merged["date"] = m.group(1).strip()
+
+                if _env_flag("SO_ENABLE_HF_NER"):
+                    ner = _get_hf_ner()
+                    if ner is not None:
+                        ents = ner(text)
+                        if isinstance(ents, list):
+                            orgs2 = []
+                            dates2 = []
+                            for e in ents:
+                                if not isinstance(e, dict):
+                                    continue
+                                lbl = str(e.get("entity_group") or e.get("entity") or "").upper().strip()
+                                word = str(e.get("word") or "").strip()
+                                if not word:
+                                    continue
+                                if lbl == "ORG":
+                                    orgs2.append(word)
+                                if lbl == "DATE":
+                                    dates2.append(word)
+                            if _field_bad("supplier", merged.get("supplier")) and orgs2:
+                                cand = max(orgs2, key=lambda s: len(s or ""))
+                                cand2 = " ".join((cand or "").split()).strip()
+                                if cand2 and len(cand2) >= 3:
+                                    merged["supplier"] = cand2
+                            if _field_bad("date", merged.get("date")) and dates2:
+                                blob = " ".join(dates2)
+                                m = re.search(r"\b([0-3]?\d[\./\-][01]?\d[\./\-]\d{2,4})\b", blob)
+                                if m:
+                                    merged["date"] = m.group(1).strip()
+        except Exception:
+            pass
+
     # Backward-compatible alias: clients may use order_nr
     if "order_no" in merged and "order_nr" not in merged:
         merged["order_nr"] = merged.get("order_no")
@@ -5826,7 +6185,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                     logger=logger,
                     log_json=None,
                     pdf_text_pages=_pdf_text_pages,
-                    pdf_tables_pages_tabula=_pdf_tables_pages_tabula,
+                    pdf_tables_pages_tabula=_pdf_tables_pages,
                     postprocess_ocr_text=_postprocess_ocr_text,
                     extract_fields_smart=_extract_fields_smart,
                     fields_to_pairs=_fields_to_pairs,
@@ -6806,7 +7165,7 @@ async def ocr_extract(
                     logger=logger,
                     log_json=log_json,
                     pdf_text_pages=_pdf_text_pages,
-                    pdf_tables_pages_tabula=_pdf_tables_pages_tabula,
+                    pdf_tables_pages_tabula=_pdf_tables_pages,
                     postprocess_ocr_text=_postprocess_ocr_text,
                     extract_fields_smart=_extract_fields_smart,
                     fields_to_pairs=_fields_to_pairs,
