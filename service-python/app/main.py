@@ -436,12 +436,12 @@ def _pdf_tables_pages(file_bytes: bytes, page_count: int) -> Optional[List[List[
     out = _pdf_tables_pages_tabula(file_bytes, page_count)
     if out is not None:
         try:
-            if _env_flag("SO_CAMELOT_FALLBACK_ON_EMPTY"):
-                has_any = any((isinstance(p, list) and len(p) > 0) for p in (out or []))
-                if not has_any:
-                    out2 = _pdf_tables_pages_camelot(file_bytes, page_count)
-                    if out2 is not None:
-                        return out2
+            has_any = any((isinstance(p, list) and len(p) > 0) for p in (out or []))
+            if (not has_any) or _env_flag("SO_CAMELOT_FALLBACK_ON_EMPTY"):
+                out2 = _pdf_tables_pages_camelot(file_bytes, page_count)
+                has_any2 = any((isinstance(p, list) and len(p) > 0) for p in (out2 or [])) if out2 is not None else False
+                if out2 is not None and has_any2:
+                    return out2
         except Exception:
             pass
         return out
@@ -569,11 +569,12 @@ def _pdf_tables_pages_camelot(file_bytes: bytes, page_count: int) -> Optional[Li
         so_dbg_tables = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
 
         flavor_cfg = _env_str("SO_CAMELOT_FLAVOR", "auto").strip().lower() or "auto"
+        base_flavors = ["lattice", "stream"]
         flavors: List[str]
         if flavor_cfg in {"lattice", "stream"}:
             flavors = [flavor_cfg]
         else:
-            flavors = ["lattice", "stream"]
+            flavors = base_flavors
 
         strip_text = _env_str("SO_CAMELOT_STRIP_TEXT", "")
         line_scale = _env_int("SO_CAMELOT_LINE_SCALE", None)
@@ -582,11 +583,40 @@ def _pdf_tables_pages_camelot(file_bytes: bytes, page_count: int) -> Optional[Li
         row_tol = _env_int("SO_CAMELOT_ROW_TOL", None)
         column_tol = _env_int("SO_CAMELOT_COLUMN_TOL", None)
 
+        def _table_quality_score(t: Dict[str, Any]) -> int:
+            try:
+                headers = t.get("headers") or []
+                rm = t.get("rows_matrix") or []
+                cols = len(headers) if isinstance(headers, list) else 0
+                head_blob = " ".join([str(h or "") for h in (headers or [])[:20]]).upper()
+                body_blob = " ".join(
+                    [str(x or "") for r in (rm or [])[:6] if isinstance(r, list) for x in r[:12]]
+                ).upper()
+                blob = (head_blob + " " + body_blob).strip()
+                score = 0
+                if cols >= 8:
+                    score += 6
+                elif cols >= 6:
+                    score += 4
+                elif cols >= 4:
+                    score += 2
+                if re.search(r"\b(BILL\s+OF\s+MATERIAL|BOM)\b", blob, flags=re.IGNORECASE):
+                    score += 6
+                if re.search(r"\b(MATERIALS\s+AND\s+TRIMS|MATERIALS|TRIMS)\b", blob, flags=re.IGNORECASE):
+                    score += 4
+                if re.search(r"\b(POSITION|PLACEMENT|TYPE|COMPOSITION|CONSUMPTION|WEIGHT)\b", blob, flags=re.IGNORECASE):
+                    score += 3
+                return int(score)
+            except Exception:
+                return 0
+
         out: List[List[Dict[str, Any]]] = []
         for p in range(1, page_count + 1):
-            tables = None
-            used_flavor = None
+            chosen_tables: List[Dict[str, Any]] = []
+            chosen_flavor: Optional[str] = None
             last_err = None
+            best_score = -1
+
             for flv in flavors:
                 try:
                     kwargs: Dict[str, Any] = {"pages": str(p), "flavor": flv}
@@ -603,15 +633,35 @@ def _pdf_tables_pages_camelot(file_bytes: bytes, page_count: int) -> Optional[Li
                     if column_tol is not None:
                         kwargs["column_tol"] = column_tol
 
-                    tables = camelot.read_pdf(tmp_path, **kwargs)
-                    used_flavor = flv
-                    last_err = None
-                    break
+                    tables0 = camelot.read_pdf(tmp_path, **kwargs)
                 except Exception as e:
                     last_err = e
                     continue
 
-            if tables is None:
+                page_tables0: List[Dict[str, Any]] = []
+                try:
+                    for t0 in (tables0 or []):
+                        df = getattr(t0, "df", None)
+                        tt = _df_to_table(df)
+                        if isinstance(tt, dict) and tt.get("headers") and tt.get("rows"):
+                            try:
+                                tt = _table_add_rows_matrix(tt)
+                            except Exception:
+                                pass
+                            page_tables0.append(tt)
+                except Exception:
+                    page_tables0 = []
+
+                page_score = 0
+                if page_tables0:
+                    page_score = max((_table_quality_score(t) for t in page_tables0), default=0)
+
+                if page_score > best_score:
+                    best_score = page_score
+                    chosen_tables = page_tables0
+                    chosen_flavor = flv
+
+            if chosen_flavor is None:
                 try:
                     if so_dbg_tables:
                         logger.info(
@@ -631,16 +681,6 @@ def _pdf_tables_pages_camelot(file_bytes: bytes, page_count: int) -> Optional[Li
                 out.append([])
                 continue
 
-            page_tables: List[Dict[str, Any]] = []
-            try:
-                for t in (tables or []):
-                    df = getattr(t, "df", None)
-                    tt = _df_to_table(df)
-                    if isinstance(tt, dict) and tt.get("headers") and tt.get("rows"):
-                        page_tables.append(tt)
-            except Exception:
-                pass
-
             try:
                 if so_dbg_tables:
                     logger.info(
@@ -649,8 +689,9 @@ def _pdf_tables_pages_camelot(file_bytes: bytes, page_count: int) -> Optional[Li
                             {
                                 "event": "so_pdf_camelot_tables",
                                 "page": p,
-                                "flavor": used_flavor,
-                                "table_count": len(page_tables),
+                                "flavor": chosen_flavor,
+                                "table_count": len(chosen_tables),
+                                "best_score": best_score,
                             },
                             ensure_ascii=False,
                         ),
@@ -658,7 +699,7 @@ def _pdf_tables_pages_camelot(file_bytes: bytes, page_count: int) -> Optional[Li
             except Exception:
                 pass
 
-            out.append(page_tables)
+            out.append(chosen_tables)
 
         return out
     except Exception:
@@ -4080,11 +4121,17 @@ def _get_ppstructure() -> "PPStructure":
         if PPStructure is None:
             raise RuntimeError("PPStructure not available in paddleocr")
 
-        lang = os.getenv("PADDLE_OCR_LANG") or "latin"
-        _ppstructure_singleton = PPStructure(
-            lang=lang,
-            show_log=False,
-        )
+        lang = (os.getenv("PADDLE_STRUCTURE_LANG") or os.getenv("PADDLE_OCR_LANG") or "en").strip() or "en"
+        # PPStructure layout/table configs only support certain langs (commonly 'en'/'ch').
+        if lang.lower() == "latin":
+            lang = "en"
+        try:
+            _ppstructure_singleton = PPStructure(
+                lang=lang,
+                show_log=False,
+            )
+        except SystemExit as e:
+            raise RuntimeError(f"PPStructure init failed (lang={lang}): {e}")
     return _ppstructure_singleton
 
 
@@ -6165,6 +6212,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     so_dbg_tables = str(os.environ.get("SO_DEBUG_PDF_TABLES") or "").strip().lower() in {"1", "true", "yes", "on"}
 
     is_pdf = filename.lower().endswith(".pdf") or _looks_like_pdf_bytes(file_bytes)
+    hm_supp_doc = False
 
     if is_pdf:
         # Always try to capture embedded PDF text for later template-specific fallbacks
@@ -6172,6 +6220,15 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             pages_text = _pdf_text_pages(file_bytes)
         except Exception:
             pages_text = None
+
+        try:
+            joined0 = "\n".join([t for t in (pages_text or []) if isinstance(t, str) and t.strip()]).strip()
+            if re.search(r"Supplementary\s+Product\s+Information", filename or "", flags=re.IGNORECASE) is not None:
+                hm_supp_doc = True
+            elif joined0 and re.search(r"\bSupplementary\s+Product\s+Information\b", joined0, flags=re.IGNORECASE) is not None:
+                hm_supp_doc = True
+        except Exception:
+            hm_supp_doc = False
 
         if try_pdf_digital_fastpath is not None:
             try:
@@ -6282,6 +6339,101 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                 page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, page_res)
                 page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
                 page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
+
+        try:
+            if engine == "paddle" and hm_supp_doc:
+                bgr0 = _ensure_bgr(input_for_ocr)
+                try:
+                    struct_res0 = _run_paddle_structure(bgr0)
+                except Exception as e:
+                    try:
+                        logger.info(
+                            "hm_supp_structure_error %s",
+                            json.dumps(
+                                {
+                                    "event": "hm_supp_structure_error",
+                                    "request_id": request_id,
+                                    "page": page_idx,
+                                    "error": str(e),
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    struct_res0 = None
+                st_tables0 = struct_res0.get("tables") if isinstance(struct_res0, dict) else None
+
+                if so_dbg_tables or hm_supp_doc:
+                    try:
+                        logger.info(
+                            "hm_supp_structure_tables %s",
+                            json.dumps(
+                                {
+                                    "event": "hm_supp_structure_tables",
+                                    "request_id": request_id,
+                                    "page": page_idx,
+                                    "structure_res_type": type(struct_res0).__name__,
+                                    "structure_res_keys": list(struct_res0.keys()) if isinstance(struct_res0, dict) else None,
+                                    "structure_table_count": len(st_tables0) if isinstance(st_tables0, list) else None,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    except Exception:
+                        pass
+
+                def _is_tabular_table(tt: Any) -> bool:
+                    if not isinstance(tt, dict):
+                        return False
+                    hs = tt.get("headers")
+                    hs_s = [str(h or "").strip() for h in hs] if isinstance(hs, list) else []
+                    if hs_s == ["key", "value"]:
+                        return False
+                    try:
+                        cc = int(tt.get("column_count") or 0)
+                    except Exception:
+                        cc = 0
+                    rm = tt.get("rows_matrix")
+                    rm_w = 0
+                    if isinstance(rm, list):
+                        try:
+                            rm_w = max((len(r) for r in rm if isinstance(r, list)), default=0)
+                        except Exception:
+                            rm_w = 0
+                    return (len(hs_s) >= 4) or (cc >= 4) or (rm_w >= 4)
+
+                good = [t for t in (st_tables0 or []) if _is_tabular_table(t)] if isinstance(st_tables0, list) else []
+
+                if so_dbg_tables or hm_supp_doc:
+                    try:
+                        logger.info(
+                            "hm_supp_structure_tables_eval %s",
+                            json.dumps(
+                                {
+                                    "event": "hm_supp_structure_tables_eval",
+                                    "request_id": request_id,
+                                    "page": page_idx,
+                                    "structure_table_count": len(st_tables0) if isinstance(st_tables0, list) else None,
+                                    "tabular_count": len(good),
+                                    "sample_headers": [
+                                        (t.get("headers") or [])[:12]
+                                        for t in (good[:2] if good else [])
+                                        if isinstance(t, dict)
+                                    ],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    except Exception:
+                        pass
+
+                if good:
+                    cur = page_res.get("tables") if isinstance(page_res.get("tables"), list) else []
+                    page_res["tables"] = cur + good
+                    page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
+        except Exception:
+            pass
 
         page_res["page"] = page_idx
         page_res["preprocess"] = prep_meta
@@ -6992,6 +7144,111 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     bom_payload = None
     try:
         if build_bom_payload is not None:
+            if hm_bom_payload_override is None:
+                try:
+                    if filename.lower().endswith(".pdf") and isinstance(file_bytes, (bytes, bytearray)):
+                        try:
+                            page_count0 = 0
+                            if isinstance(pages_text, list):
+                                page_count0 = len(pages_text)
+                            if page_count0 <= 0 and isinstance(images_bgr, list):
+                                page_count0 = len(images_bgr)
+                        except Exception:
+                            page_count0 = 0
+
+                        if page_count0 > 0:
+                            pdf_tbl_pages = _pdf_tables_pages(bytes(file_bytes), page_count0)
+                            pdf_tbls_flat: List[Dict[str, Any]] = []
+                            if isinstance(pdf_tbl_pages, list):
+                                for pi, plist in enumerate(pdf_tbl_pages, start=1):
+                                    if not isinstance(plist, list):
+                                        continue
+                                    for tt in plist:
+                                        if isinstance(tt, dict):
+                                            pdf_tbls_flat.append({"page": pi, **tt})
+                            if pdf_tbls_flat:
+                                hm_bom_payload_override = build_bom_payload(tables=pdf_tbls_flat)
+                except Exception:
+                    pass
+
+            if hm_bom_payload_override is None:
+                try:
+                    def _parse_hm_bom_from_text(t: str) -> Optional[Dict[str, Any]]:
+                        txt = str(t or "")
+                        if not txt.strip():
+                            return None
+                        if re.search(r"\bBill\s+of\s+Material\b", txt, flags=re.IGNORECASE) is None:
+                            return None
+                        lines0 = [ln.rstrip() for ln in txt.replace("\r", "\n").split("\n")]
+                        start = -1
+                        for i, ln in enumerate(lines0):
+                            if re.search(r"\bBill\s+of\s+Material\b", ln, flags=re.IGNORECASE):
+                                start = i
+                                break
+                        if start < 0:
+                            return None
+                        stop_re = re.compile(r"^(Created\b|Page\s+\d+\s*/\s*\d+|\s*Page\s+\d+)", flags=re.IGNORECASE)
+                        out_lines: List[Dict[str, Any]] = []
+                        for ln in lines0[start : min(len(lines0), start + 200)]:
+                            if stop_re.search(ln or ""):
+                                break
+                            s = re.sub(r"\s+", " ", str(ln or "").strip())
+                            if not s:
+                                continue
+                            # Skip obvious header lines
+                            if re.search(r"\b(Position|Placement|Type|Description|Composition|Consumption|Weight|Supplier)\b", s, flags=re.IGNORECASE):
+                                continue
+                            if re.search(r"\b(Bill\s+of\s+Material|Materials\s+and\s+Trims)\b", s, flags=re.IGNORECASE):
+                                continue
+                            if re.search(r"\b(Booking\s*Id|Demand\s*Id)\b", s, flags=re.IGNORECASE):
+                                continue
+
+                            parts = [p.strip() for p in re.split(r"\s{2,}", ln.strip()) if p.strip()]
+                            if len(parts) < 4:
+                                continue
+
+                            pos = parts[0]
+                            placement = parts[1] if len(parts) > 1 else ""
+                            typ = parts[2] if len(parts) > 2 else ""
+                            component = " ".join([x for x in [pos, placement, typ] if x]).strip()
+
+                            composition = ""
+                            for p in parts:
+                                if re.search(r"\b\d{1,3}\s*%\b", p):
+                                    composition = p
+                                    break
+                            consumption = ""
+                            uom = ""
+                            for p in parts:
+                                m = re.search(r"\b(\d+(?:\.\d+)?)\s*(m|meter|km|yd|pcs|piece|g|gram)\b", p, flags=re.IGNORECASE)
+                                if m:
+                                    consumption = m.group(1)
+                                    uom = m.group(2).upper()
+                                    break
+
+                            if not composition and re.search(r"\bPOLYESTER\b|\bCOTTON\b|\bVISCOSE\b", s, flags=re.IGNORECASE):
+                                # If OCR drops %, keep a best-effort composition token
+                                composition = " ".join([p for p in parts if re.search(r"POLYESTER|COTTON|VISCOSE|NYLON|ELASTANE|WOOL", p, flags=re.IGNORECASE)])
+
+                            if not component and not composition:
+                                continue
+
+                            out_lines.append(
+                                {
+                                    "component": component or "TRIM",
+                                    "composition": composition or "",
+                                    "consumption": consumption or "",
+                                    "uom": uom or "",
+                                }
+                            )
+
+                        if not out_lines:
+                            return None
+                        return {"source": {"kind": "hm_text"}, "lines": out_lines}
+
+                    hm_bom_payload_override = _parse_hm_bom_from_text(hm_text)
+                except Exception:
+                    pass
             bom_payload = hm_bom_payload_override or build_bom_payload(tables=combined_tables)
     except Exception:
         bom_payload = None
@@ -7151,6 +7408,7 @@ async def ocr_extract(
 
     # If PDF has embedded text (selectable text), prefer extracting it directly.
     is_pdf = filename.lower().endswith(".pdf") or (isinstance(content_type, str) and "pdf" in content_type.lower()) or _looks_like_pdf_bytes(file_bytes)
+    hm_supp_doc = False
     if is_pdf:
         # Normalize filename so downstream logic and logs clearly indicate PDF.
         if not filename.lower().endswith(".pdf"):
@@ -7161,6 +7419,32 @@ async def ocr_extract(
             pages_text = _pdf_text_pages(file_bytes)
         except Exception:
             pages_text = None
+
+        try:
+            joined0 = "\n".join([t for t in (pages_text or []) if isinstance(t, str) and t.strip()]).strip()
+            if re.search(r"Supplementary\s+Product\s+Information", filename or "", flags=re.IGNORECASE) is not None:
+                hm_supp_doc = True
+            elif joined0 and re.search(r"\bSupplementary\s+Product\s+Information\b", joined0, flags=re.IGNORECASE) is not None:
+                hm_supp_doc = True
+        except Exception:
+            hm_supp_doc = False
+
+        try:
+            logger.info(
+                "hm_supp_detect %s",
+                json.dumps(
+                    {
+                        "event": "hm_supp_detect",
+                        "request_id": request_id,
+                        "hm_supp_doc": hm_supp_doc,
+                        "filename": filename,
+                        "has_pages_text": bool(pages_text),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        except Exception:
+            pass
 
         if try_pdf_digital_fastpath is not None:
             try:
@@ -7296,6 +7580,100 @@ async def ocr_extract(
                     page_res["tables"] = _extract_tables_from_paddle_page(image_for_tables, page_res)
                     page_res["text"] = _postprocess_ocr_text(page_res.get("text") or "")
                     page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
+
+            try:
+                if engine == "paddle" and hm_supp_doc:
+                    bgr0 = _ensure_bgr(input_for_ocr)
+                    try:
+                        struct_res0 = _run_paddle_structure(bgr0)
+                    except Exception as e:
+                        try:
+                            logger.info(
+                                "hm_supp_structure_error %s",
+                                json.dumps(
+                                    {
+                                        "event": "hm_supp_structure_error",
+                                        "request_id": request_id,
+                                        "page": page_idx,
+                                        "error": str(e),
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                        except Exception:
+                            pass
+                        struct_res0 = None
+                    st_tables0 = struct_res0.get("tables") if isinstance(struct_res0, dict) else None
+
+                    if so_dbg_tables or hm_supp_doc:
+                        try:
+                            logger.info(
+                                "hm_supp_structure_tables %s",
+                                json.dumps(
+                                    {
+                                        "event": "hm_supp_structure_tables",
+                                        "request_id": request_id,
+                                        "page": page_idx,
+                                        "structure_res_type": type(struct_res0).__name__,
+                                        "structure_res_keys": list(struct_res0.keys()) if isinstance(struct_res0, dict) else None,
+                                        "structure_table_count": len(st_tables0) if isinstance(st_tables0, list) else None,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                        except Exception:
+                            pass
+
+                    def _is_tabular_table(tt: Any) -> bool:
+                        if not isinstance(tt, dict):
+                            return False
+                        hs = tt.get("headers")
+                        hs_s = [str(h or "").strip() for h in hs] if isinstance(hs, list) else []
+                        if hs_s == ["key", "value"]:
+                            return False
+                        try:
+                            cc = int(tt.get("column_count") or 0)
+                        except Exception:
+                            cc = 0
+                        rm = tt.get("rows_matrix")
+                        rm_w = 0
+                        if isinstance(rm, list):
+                            try:
+                                rm_w = max((len(r) for r in rm if isinstance(r, list)), default=0)
+                            except Exception:
+                                rm_w = 0
+                        return (len(hs_s) >= 4) or (cc >= 4) or (rm_w >= 4)
+
+                    good = [t for t in (st_tables0 or []) if _is_tabular_table(t)] if isinstance(st_tables0, list) else []
+                    if so_dbg_tables or hm_supp_doc:
+                        try:
+                            logger.info(
+                                "hm_supp_structure_tables_eval %s",
+                                json.dumps(
+                                    {
+                                        "event": "hm_supp_structure_tables_eval",
+                                        "request_id": request_id,
+                                        "page": page_idx,
+                                        "structure_table_count": len(st_tables0) if isinstance(st_tables0, list) else None,
+                                        "tabular_count": len(good),
+                                        "sample_headers": [
+                                            (t.get("headers") or [])[:12]
+                                            for t in (good[:2] if good else [])
+                                            if isinstance(t, dict)
+                                        ],
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                        except Exception:
+                            pass
+
+                    if good:
+                        cur = page_res.get("tables") if isinstance(page_res.get("tables"), list) else []
+                        page_res["tables"] = cur + good
+                        page_res["fields"] = _extract_fields_smart(page_res.get("text") or "", page_res.get("tables") or [])
+            except Exception:
+                pass
 
             page_res["page"] = page_idx
             page_res["preprocess"] = prep_meta

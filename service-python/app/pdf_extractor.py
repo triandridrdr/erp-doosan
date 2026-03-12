@@ -406,6 +406,14 @@ def try_pdf_digital_fastpath(
         except Exception:
             hm_bom_payload = None
 
+        # Fallback: section title may be missing/flattened in extracted tables (e.g., Camelot stream).
+        # Try scoring across all tables before bypassing fast-path.
+        if hm_bom_payload is None:
+            try:
+                hm_bom_payload = build_bom_payload(tables=combined_tables)
+            except Exception:
+                hm_bom_payload = None
+
         # If we can't find the core Materials & Trims BoM table, bypass fast-path so OCR pipeline can try.
         if hm_bom_payload is None:
             return None

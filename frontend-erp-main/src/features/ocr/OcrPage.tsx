@@ -248,9 +248,16 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
 
   if (bomRowsRaw.length === 0) {
     const compText = compositionsinformation || '';
-    const upper = compText.toUpperCase();
+    const compTextUpper = compText.toUpperCase();
+    const hasPct = /\b\d{1,3}\s*%\b/.test(compTextUpper);
+    const hasFiberKw = /\b(COTTON|POLYESTER|VISCOSE|NYLON|ELASTANE|WOOL|LINEN|ACRYLIC|RAYON|SILK)\b/.test(compTextUpper);
+    const allowCompFallback = (hasPct || hasFiberKw) && compTextUpper.length <= 800;
+
+    if (!allowCompFallback) {
+      // leave bomRowsRaw empty; caller can still add rows manually
+    } else {
     const hits = components
-      .map((k) => ({ k, i: upper.indexOf(k) }))
+      .map((k) => ({ k, i: compTextUpper.indexOf(k) }))
       .filter((x) => x.i >= 0)
       .sort((a, b) => a.i - b.i);
 
@@ -316,6 +323,7 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
           editable: true,
         });
       }
+    }
     }
   }
 
