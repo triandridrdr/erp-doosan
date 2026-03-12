@@ -28,6 +28,10 @@ export interface OcrResponseData {
 
 export type SalesOrderPayload = {
   header?: Record<string, unknown>;
+  bom_payload?: {
+    lines?: Array<Record<string, unknown>>;
+    source?: Record<string, unknown>;
+  };
   total_order?: {
     grid?: Array<Record<string, unknown>>;
     unit_lot?: unknown;

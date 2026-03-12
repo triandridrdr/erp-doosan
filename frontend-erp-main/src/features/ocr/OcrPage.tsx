@@ -162,6 +162,13 @@ const parseCompositionPercentItems = (text: string) => {
   return parts.length > 0 ? parts : [raw];
 };
 
+const asNumLikeString = (v: unknown) => {
+  const s = asString(v).trim();
+  if (!s) return '';
+  const m = s.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+  return m ? m[0] : s;
+};
+
 const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
   const header = (payload?.header || {}) as Record<string, unknown>;
   const ordernr = asString(pickAny(header, ['ordernr', 'order_nr', 'order_no', 'order']));
@@ -211,26 +218,84 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
   const components = ['MAIN FABRIC', 'SECONDARY FABRIC', 'EMBELLISHMENT', 'OUTER SHELL', 'TRIMMINGS'];
   const bomRowsRaw: ErpBomRow[] = [];
 
-  const compText = compositionsinformation || '';
-  const upper = compText.toUpperCase();
-  const hits = components
-    .map((k) => ({ k, i: upper.indexOf(k) }))
-    .filter((x) => x.i >= 0)
-    .sort((a, b) => a.i - b.i);
+  const bomLines = ((payload as any)?.bom_payload?.lines || []) as Array<Record<string, unknown>>;
+  if (Array.isArray(bomLines) && bomLines.length > 0) {
+    for (const ln of bomLines) {
+      if (!ln || typeof ln !== 'object') continue;
+      const component = asString((ln as any).component) || asString((ln as any).material) || asString((ln as any).description);
+      const { category, uom } = inferBomCategoryAndUom(component);
+      const composition = asString((ln as any).composition);
+      const uomRaw = asString((ln as any).uom) || uom;
+      const consumption = (ln as any).consumption;
+      const consumptionPerUnit = consumption === null || consumption === undefined ? '' : asNumLikeString(consumption);
+      const waste = (ln as any).waste_percent;
+      const wastePercent = waste === null || waste === undefined ? '' : asNumLikeString(waste);
 
-  if (hits.length > 0) {
-    for (let idx = 0; idx < hits.length; idx++) {
-      const start = hits[idx].i;
-      const end = idx + 1 < hits.length ? hits[idx + 1].i : compText.length;
-      const chunk = compText.slice(start, end).trim();
-      const compKey = hits[idx].k;
-      const items = parseCompositionPercentItems(chunk);
-      const { category, uom } = inferBomCategoryAndUom(compKey);
+      if (!component && !composition) continue;
+
+      bomRowsRaw.push({
+        id: newRowId(),
+        component: component || 'TRIMMINGS',
+        category,
+        composition: (composition || '').trim(),
+        uom: (uomRaw || '').trim(),
+        consumptionPerUnit: (consumptionPerUnit || '').trim(),
+        wastePercent: (wastePercent || '').trim(),
+        editable: true,
+      });
+    }
+  }
+
+  if (bomRowsRaw.length === 0) {
+    const compText = compositionsinformation || '';
+    const upper = compText.toUpperCase();
+    const hits = components
+      .map((k) => ({ k, i: upper.indexOf(k) }))
+      .filter((x) => x.i >= 0)
+      .sort((a, b) => a.i - b.i);
+
+    if (hits.length > 0) {
+      for (let idx = 0; idx < hits.length; idx++) {
+        const start = hits[idx].i;
+        const end = idx + 1 < hits.length ? hits[idx + 1].i : compText.length;
+        const chunk = compText.slice(start, end).trim();
+        const compKey = hits[idx].k;
+        const items = parseCompositionPercentItems(chunk);
+        const { category, uom } = inferBomCategoryAndUom(compKey);
+        if (items.length > 0) {
+          for (const it of items) {
+            bomRowsRaw.push({
+              id: newRowId(),
+              component: compKey,
+              category,
+              composition: (it || '').replace(/,/g, '').trim(),
+              uom,
+              consumptionPerUnit: '',
+              wastePercent: '',
+              editable: true,
+            });
+          }
+        } else {
+          bomRowsRaw.push({
+            id: newRowId(),
+            component: compKey,
+            category,
+            composition: chunk.replace(/,/g, '').trim(),
+            uom,
+            consumptionPerUnit: '',
+            wastePercent: '',
+            editable: true,
+          });
+        }
+      }
+    } else if (compText.trim()) {
+      const items = parseCompositionPercentItems(compText);
+      const { category, uom } = inferBomCategoryAndUom('MAIN FABRIC');
       if (items.length > 0) {
         for (const it of items) {
           bomRowsRaw.push({
             id: newRowId(),
-            component: compKey,
+            component: 'MAIN FABRIC',
             category,
             composition: (it || '').replace(/,/g, '').trim(),
             uom,
@@ -242,43 +307,15 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
       } else {
         bomRowsRaw.push({
           id: newRowId(),
-          component: compKey,
-          category,
-          composition: chunk.replace(/,/g, '').trim(),
-          uom,
-          consumptionPerUnit: '',
-          wastePercent: '',
-          editable: true,
-        });
-      }
-    }
-  } else if (compText.trim()) {
-    const items = parseCompositionPercentItems(compText);
-    const { category, uom } = inferBomCategoryAndUom('MAIN FABRIC');
-    if (items.length > 0) {
-      for (const it of items) {
-        bomRowsRaw.push({
-          id: newRowId(),
           component: 'MAIN FABRIC',
           category,
-          composition: (it || '').replace(/,/g, '').trim(),
+          composition: compText.replace(/,/g, '').trim(),
           uom,
           consumptionPerUnit: '',
           wastePercent: '',
           editable: true,
         });
       }
-    } else {
-      bomRowsRaw.push({
-        id: newRowId(),
-        component: 'MAIN FABRIC',
-        category,
-        composition: compText.replace(/,/g, '').trim(),
-        uom,
-        consumptionPerUnit: '',
-        wastePercent: '',
-        editable: true,
-      });
     }
   }
 

@@ -6730,9 +6730,14 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         joined_text = "\n".join([t for t in (combined_texts or []) if isinstance(t, str) and t.strip()]).strip()
-        embedded_text = "\n".join([t for t in (pages_text or []) if isinstance(t, str) and t.strip()]).strip() if pages_text else ""
-        # Prefer embedded PDF text (higher fidelity) but include OCR text as fallback.
-        hm_text = (embedded_text + "\n\n" + joined_text).strip() if embedded_text else joined_text
+        if joined_text:
+            engine2 = classify_document(joined_text) if classify_document is not None else None
+            if engine2 and isinstance(engine2, dict) and engine2.get("document_type"):
+                sales_order_payload["document_type"] = engine2.get("document_type")
+    except Exception:
+        pass
+    hm_text = (embedded_text + "\n\n" + joined_text).strip() if embedded_text else joined_text
+    if True:
 
         def _is_hm_supplementary_text(t: str, fn: str) -> bool:
             if re.search(r"Supplementary\s+Product\s+Information", str(fn or ""), flags=re.IGNORECASE) is not None:
@@ -6984,14 +6989,18 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                                 pass
             except Exception:
                 pass
-    except Exception:
-        pass
     bom_payload = None
     try:
         if build_bom_payload is not None:
             bom_payload = hm_bom_payload_override or build_bom_payload(tables=combined_tables)
     except Exception:
         bom_payload = None
+
+    try:
+        if isinstance(sales_order_payload, dict) and isinstance(bom_payload, dict) and bom_payload:
+            sales_order_payload["bom_payload"] = bom_payload
+    except Exception:
+        pass
 
     # View mode: return only the minimal JSON payload (hide full text/pages/tables for production use)
     if view in {"json", "payload", "minimal", "view_json"}:

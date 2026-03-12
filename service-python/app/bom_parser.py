@@ -72,6 +72,11 @@ def _infer_bom_columns(headers: List[str]) -> Dict[str, int]:
 
     material_i = pick(["material", "materialcode", "item", "itemcode", "code", "part", "component", "trim", "accessory", "accessories"])
     desc_i = pick(["description", "desc", "materialdescription", "itemdescription", "name"])
+    position_i = pick(["position"])
+    placement_i = pick(["placement"])
+    type_i = pick(["type"])
+    composition_i = pick(["composition"])
+    consumption_i = pick(["consumption", "consumptionperunit", "consumptionperunit", "consumptionperunit", "usage", "req", "required"])
     color_i = pick(["color", "colour", "col"])
     size_i = pick(["size", "sizespec", "dimension"])
     qty_i = pick(["qty", "quantity", "consumption", "usage", "req", "required"])
@@ -81,6 +86,16 @@ def _infer_bom_columns(headers: List[str]) -> Dict[str, int]:
         cols["material"] = int(material_i)
     if desc_i is not None:
         cols["description"] = int(desc_i)
+    if position_i is not None:
+        cols["position"] = int(position_i)
+    if placement_i is not None:
+        cols["placement"] = int(placement_i)
+    if type_i is not None:
+        cols["type"] = int(type_i)
+    if composition_i is not None:
+        cols["composition"] = int(composition_i)
+    if consumption_i is not None:
+        cols["consumption"] = int(consumption_i)
     if color_i is not None:
         cols["color"] = int(color_i)
     if size_i is not None:
@@ -212,8 +227,13 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                 return ""
             return cells[idx]
 
+        position = get("position")
+        placement = get("placement")
+        typ = get("type")
         material = get("material")
         desc = get("description")
+        composition = get("composition")
+        consumption_raw = get("consumption")
         qty_raw = get("qty")
         uom = _norm_uom(get("uom"))
         color = get("color")
@@ -222,10 +242,29 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
         if not (material or desc):
             continue
 
+        component = " ".join([x for x in [position, placement, typ] if x]).strip()
+        if not component:
+            component = material or desc
+
+        consumption_qty = None
+        consumption_uom = ""
+        if consumption_raw:
+            mcons = re.search(r"(-?\d+(?:[\.,]\d+)?)", consumption_raw.replace(" ", ""))
+            if mcons:
+                consumption_qty = _to_number(mcons.group(1))
+            mu = re.search(r"\b([A-Za-z]{1,6})\b", consumption_raw)
+            if mu:
+                consumption_uom = _norm_uom(mu.group(1))
+        if not uom and consumption_uom:
+            uom = consumption_uom
+
         qty_num = _to_number(qty_raw)
         line: Dict[str, Any] = {
+            "component": component,
             "material": material,
             "description": desc,
+            "composition": composition,
+            "consumption": consumption_qty if consumption_qty is not None else (consumption_raw or ""),
             "qty": qty_num if qty_num is not None else (qty_raw or ""),
             "uom": uom,
             "color": color,
