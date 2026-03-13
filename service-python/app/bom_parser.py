@@ -70,7 +70,24 @@ def _infer_bom_columns(headers: List[str]) -> Dict[str, int]:
                     return i
         return None
 
-    material_i = pick(["material", "materialcode", "item", "itemcode", "code", "part", "component", "trim", "accessory", "accessories"])
+    # NOTE: avoid overly broad tokens like 'component' since HM tables have a column
+    # 'Component Treatments' which is not the material/part number.
+    material_i = pick([
+        "material",
+        "materialappearance",
+        "material appearance",
+        "materialcode",
+        "item",
+        "itemcode",
+        "code",
+        "part",
+        "trim",
+        "accessory",
+        "accessories",
+        "supplierarticle",
+        "supplier article",
+        "article",
+    ])
     desc_i = pick(["description", "desc", "materialdescription", "itemdescription", "name"])
     position_i = pick(["position"])
     placement_i = pick(["placement"])
@@ -116,10 +133,30 @@ def _looks_like_header_row(row: List[Any]) -> bool:
             return False
         blob = " ".join(cells).upper()
         hits = 0
-        for kw in ["MATERIAL", "ITEM", "DESCRIPTION", "DESC", "QTY", "QUANTITY", "UOM", "UNIT", "COLOR", "COLOUR", "SIZE", "CONSUMPTION"]:
+        for kw in [
+            "MATERIAL",
+            "MATERIAL APPEARANCE",
+            "ITEM",
+            "DESCRIPTION",
+            "DESC",
+            "POSITION",
+            "PLACEMENT",
+            "TYPE",
+            "COMPOSITION",
+            "QTY",
+            "QUANTITY",
+            "UOM",
+            "UNIT",
+            "COLOR",
+            "COLOUR",
+            "SIZE",
+            "CONSUMPTION",
+            "WEIGHT",
+            "SUPPLIER",
+        ]:
             if re.search(r"\b" + re.escape(kw) + r"\b", blob):
                 hits += 1
-        return hits >= 2
+        return hits >= 3
     except Exception:
         return False
 
