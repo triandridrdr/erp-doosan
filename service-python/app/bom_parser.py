@@ -168,6 +168,8 @@ def _is_section_or_total_row(cells: List[str]) -> bool:
             return True
         if re.fullmatch(r"(BOM|BILL\s+OF\s+MATERIALS)", blob, flags=re.IGNORECASE):
             return True
+        if re.search(r"\bBILL\s+OF\s+MATERIAL\b", blob, flags=re.IGNORECASE):
+            return True
         if re.search(r"\b(TOTAL|SUBTOTAL|GRAND\s+TOTAL)\b", blob, flags=re.IGNORECASE):
             return True
         if re.search(r"\b(MAIN\s+FABRIC|SECONDARY\s+FABRIC|EMBELLISHMENT|LINING|INTERLINING|TRIM|TRIMMINGS|ACCESSOR(Y|IES)|LABEL|PACKING|PACKAGING)\b", blob, flags=re.IGNORECASE):
@@ -247,12 +249,131 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
 
     cols = _infer_bom_columns(headers)
 
+    # Determine a robust start row (skip title/header repeats) early so HM heuristics can sample item rows.
+    start_idx = 0
+    try:
+        while start_idx < len(rm) and isinstance(rm[start_idx], list):
+            cells0 = [_cell_str(c) for c in rm[start_idx]]
+            if _looks_like_header_row(rm[start_idx]) or _is_section_or_total_row(cells0):
+                start_idx += 1
+                continue
+            break
+    except Exception:
+        start_idx = 0
+
+    try:
+        # HM Supplementary PPStructure often emits placeholder headers (col_6/col_8)
+        # and/or merges the 3 columns (Composition/Construction/Consumption/Weight).
+        # Use item-row content to infer positions for composition/consumption/weight.
+        is_hm = isinstance(headers, list) and any(
+            re.search(r"\bPOSITION\b", str(h or ""), flags=re.IGNORECASE) for h in headers
+        )
+        if is_hm and isinstance(rm, list):
+            # Collect sample strings per column from the first item rows.
+            col_w = 0
+            for r in rm[start_idx : start_idx + 12]:
+                if isinstance(r, list):
+                    col_w = max(col_w, len(r))
+
+            def _sample_col(i: int) -> List[str]:
+                out: List[str] = []
+                for r in rm[start_idx : start_idx + 18]:
+                    if not isinstance(r, list):
+                        continue
+                    if i < 0 or i >= len(r):
+                        continue
+                    s = _cell_str(r[i])
+                    if s:
+                        out.append(s)
+                return out
+
+            comp_score: Dict[int, int] = {}
+            cons_score: Dict[int, int] = {}
+            weight_score: Dict[int, int] = {}
+
+            for i in range(col_w):
+                vals = _sample_col(i)
+                if not vals:
+                    continue
+                blob = " ".join(vals).upper()
+
+                # Composition: usually contains percent + fiber names.
+                sc = 0
+                if re.search(r"\b\d{1,3}\s*%\b", blob) is not None:
+                    sc += 3
+                if re.search(
+                    r"\b(COTTON|POLYESTER|VISCOSE|NYLON|ELASTANE|WOOL|LINEN|ACRYLIC|RAYON|SILK|POLYAMIDE)\b",
+                    blob,
+                ) is not None:
+                    sc += 1
+                if sc:
+                    comp_score[i] = sc
+
+                # Weight: g/m, g/m2, gram/km, etc.
+                sw = 0
+                if re.search(r"\b\d+(?:[\.,]\d+)?\s*(?:G/M2|G/M|G/PC|G/PIECE|GSM)\b", blob) is not None:
+                    sw += 3
+                if re.search(r"\bGRAM\b", blob) is not None and re.search(r"\b/\s*(?:M|M2|KM|PC|PIECE)\b", blob) is not None:
+                    sw += 2
+                if sw:
+                    weight_score[i] = sw
+
+                # Consumption: numeric + length/per-unit units, but not a weight pattern.
+                ss = 0
+                if re.search(r"\b\d+(?:[\.,]\d+)?\b", blob) is not None:
+                    if re.search(r"\b(M|CM|MM|YD|YARD|KM|PER\s*UNIT|/\s*UNIT)\b", blob) is not None:
+                        ss += 2
+                if re.search(r"\bG/", blob) is None and re.search(r"\bGSM\b", blob) is None:
+                    if ss:
+                        cons_score[i] = ss
+
+            def _best(d: Dict[int, int]) -> Optional[int]:
+                if not d:
+                    return None
+                return sorted(d.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+            i_comp = _best(comp_score)
+            i_cons = _best(cons_score)
+            i_w = _best(weight_score)
+
+            if i_comp is not None:
+                cols["composition"] = int(i_comp)
+            if i_cons is not None:
+                cols["consumption"] = int(i_cons)
+            if i_w is not None:
+                cols["weight"] = int(i_w)
+    except Exception:
+        pass
+
+    try:
+        # HM Supplementary PPStructure often emits placeholder headers (col_7/col_9)
+        # and/or merges the 3 columns (Construction/Consumption/Weight) into one header.
+        # Use early row content to infer positions for consumption/weight.
+        if isinstance(headers, list) and any(re.search(r"\bPOSITION\b", str(h or ""), flags=re.IGNORECASE) for h in headers):
+            if isinstance(rm, list) and rm:
+                scan_rows = [r for r in rm[:6] if isinstance(r, list)]
+                if scan_rows:
+                    best_hits: Dict[str, int] = {}
+                    for r in scan_rows:
+                        for i, c in enumerate([_cell_str(x) for x in r]):
+                            cu = c.upper()
+                            if not cu:
+                                continue
+                            if re.fullmatch(r"CONSUMPTION", cu, flags=re.IGNORECASE):
+                                best_hits["consumption"] = i
+                            if re.fullmatch(r"WEIGHT", cu, flags=re.IGNORECASE):
+                                best_hits["weight"] = i
+                            if re.fullmatch(r"CONSTRUCTION", cu, flags=re.IGNORECASE):
+                                best_hits["construction"] = i
+                    if "consumption" in best_hits and "consumption" not in cols:
+                        cols["consumption"] = int(best_hits["consumption"])
+                    if "weight" in best_hits and "weight" not in cols:
+                        cols["weight"] = int(best_hits["weight"])
+    except Exception:
+        pass
+
     if "material" not in cols and "description" not in cols:
         return None
-
-    start_idx = 0
-    if rm and isinstance(rm[0], list) and _looks_like_header_row(rm[0]):
-        start_idx = 1
 
     lines: List[Dict[str, Any]] = []
     seen_keys = set()

@@ -6352,7 +6352,9 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         try:
             if engine == "paddle" and hm_supp_doc:
-                bgr0 = _ensure_bgr(input_for_ocr)
+                # Use the original image for PPStructure. Aggressive preprocessing (thresholding)
+                # can destroy table ruling lines and reduce table block detection.
+                bgr0 = _ensure_bgr(img_bgr)
                 try:
                     struct_res0 = _run_paddle_structure(bgr0)
                 except Exception as e:
@@ -7593,7 +7595,9 @@ async def ocr_extract(
 
             try:
                 if engine == "paddle" and hm_supp_doc:
-                    bgr0 = _ensure_bgr(input_for_ocr)
+                    # Use the original image for PPStructure. Aggressive preprocessing (thresholding)
+                    # can destroy table ruling lines and reduce table block detection.
+                    bgr0 = _ensure_bgr(img_bgr)
                     try:
                         struct_res0 = _run_paddle_structure(bgr0)
                     except Exception as e:
@@ -8077,6 +8081,12 @@ async def ocr_extract(
                     )
                 except Exception:
                     pass
+    except Exception:
+        pass
+
+    try:
+        if isinstance(sales_order_payload, dict) and isinstance(bom_payload, dict) and bom_payload:
+            sales_order_payload["bom_payload"] = bom_payload
     except Exception:
         pass
 

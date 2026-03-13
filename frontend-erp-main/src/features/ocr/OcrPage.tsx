@@ -630,9 +630,17 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   });
 
   const salesOrderPayload = useMemo(() => {
-    const p = effectiveExtractResult?.data?.salesOrderPayload;
-    return p && typeof p === 'object' ? (p as SalesOrderPayload) : null;
-  }, [effectiveExtractResult?.data?.salesOrderPayload]);
+    const r: any = effectiveExtractResult as any;
+    const p0 = r?.salesOrderPayload ?? r?.data?.salesOrderPayload ?? r?.data?.data?.salesOrderPayload;
+    if (!p0 || typeof p0 !== 'object') return null;
+
+    const bom0 = r?.bomPayload ?? r?.bom_payload ?? r?.data?.bomPayload ?? r?.data?.bom_payload;
+    const so: any = { ...(p0 as any) };
+    if (bom0 && typeof bom0 === 'object' && !so?.bom_payload) {
+      so.bom_payload = bom0;
+    }
+    return so as SalesOrderPayload;
+  }, [effectiveExtractResult]);
 
   useEffect(() => {
     if (!salesOrderPayload) {
