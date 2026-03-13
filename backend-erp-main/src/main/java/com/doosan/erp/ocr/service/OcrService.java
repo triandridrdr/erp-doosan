@@ -14,6 +14,7 @@ import com.doosan.erp.ocr.dto.TextBlockDto;
 import com.doosan.erp.ocr.dto.python.PythonOcrExtractResponse;
 import com.doosan.erp.ocr.dto.python.PythonOcrPageResult;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -184,13 +185,32 @@ public class OcrService {
         Map<String, String> formFields = parsePythonFields(response.getFields());
         List<TableDto> tables = parsePythonTables(response.getTables());
 
+        JsonNode mergedSalesOrderPayload = response.getSalesOrderPayload();
+        try {
+            JsonNode bomPayload = response.getBomPayload();
+            if (bomPayload != null && !bomPayload.isNull()) {
+                if (mergedSalesOrderPayload != null && mergedSalesOrderPayload.isObject()) {
+                    ObjectNode obj = (ObjectNode) mergedSalesOrderPayload;
+                    if (!obj.has("bom_payload")) {
+                        obj.set("bom_payload", bomPayload);
+                    }
+                } else {
+                    ObjectNode obj = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+                    obj.set("bom_payload", bomPayload);
+                    mergedSalesOrderPayload = obj;
+                }
+            }
+        } catch (Exception e) {
+            // keep original payload
+        }
+
         return OcrResponse.builder()
                 .extractedText(extractedText)
                 .blocks(blocks)
                 .averageConfidence(averageConfidence)
                 .formFields(formFields)
                 .tables(tables)
-                .salesOrderPayload(response.getSalesOrderPayload())
+                .salesOrderPayload(mergedSalesOrderPayload)
                 .build();
     }
 

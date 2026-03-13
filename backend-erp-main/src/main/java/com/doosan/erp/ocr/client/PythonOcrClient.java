@@ -43,7 +43,7 @@ public class PythonOcrClient {
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(60))
+                .timeout(Duration.ofSeconds(180))
                 .header("Accept", MediaType.APPLICATION_JSON_VALUE)
                 .header("Content-Type", fileContentType)
                 .header("X-Filename", safeFilename)
@@ -52,7 +52,7 @@ public class PythonOcrClient {
 
         try {
             HttpClient client = HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofSeconds(20))
+                    .connectTimeout(Duration.ofSeconds(30))
                     .version(HttpClient.Version.HTTP_1_1)
                     .build();
 

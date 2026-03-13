@@ -152,6 +152,16 @@ def _score_bom_table(headers: List[str], rows_matrix: List[List[Any]]) -> int:
     if not b:
         return 0
     score = 0
+    # HM Supplementary PPStructure signature (often doesn't include explicit 'BOM' keyword)
+    hm_hits = 0
+    for kw in ["POSITION", "PLACEMENT", "COMPOSITION", "CONSUMPTION", "SUPPLIER", "MATERIAL APPEARANCE"]:
+        if re.search(r"\b" + re.escape(kw) + r"\b", b, flags=re.IGNORECASE):
+            hm_hits += 1
+    if re.search(r"\bTYPE\b", b, flags=re.IGNORECASE):
+        hm_hits += 1
+    if hm_hits >= 4:
+        score += 8
+
     if re.search(r"\b(BOM|BILL\s+OF\s+MATERIALS)\b", b, flags=re.IGNORECASE):
         score += 6
     if re.search(r"\b(MATERIAL|FABRIC|TRIM|ACCESSOR(Y|IES)|COMPONENT)\b", b, flags=re.IGNORECASE):

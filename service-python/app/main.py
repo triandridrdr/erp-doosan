@@ -2979,6 +2979,16 @@ def _filter_tables_for_sales_order(tables: Any) -> Any:
         if not blob:
             return False
 
+        try:
+            hm_hits = 0
+            for kw in ["POSITION", "PLACEMENT", "TYPE", "COMPOSITION", "CONSUMPTION", "MATERIAL APPEARANCE"]:
+                if re.search(r"\b" + re.escape(kw) + r"\b", blob, flags=re.IGNORECASE) is not None:
+                    hm_hits += 1
+            if hm_hits >= 4:
+                return False
+        except Exception:
+            pass
+
         # Don't remove size grids; be strict to avoid false negatives on strings like 'EUR/USA S MEX 26'
         try:
             size_tokens = ["XS", "S", "M", "L", "XL", "XXL", "XXS"]

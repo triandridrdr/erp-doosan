@@ -23,6 +23,9 @@ public class PythonOcrExtractResponse {
     private JsonNode tables;
     private JsonNode fields;
 
+    @JsonProperty("bom_payload")
+    private JsonNode bomPayload;
+
     @JsonProperty("sales_order_payload")
     private JsonNode salesOrderPayload;
 }
