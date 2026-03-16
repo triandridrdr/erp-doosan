@@ -97,6 +97,23 @@ def _infer_bom_columns(headers: List[str]) -> Dict[str, int]:
     type_i = pick(["type"])
     composition_i = pick(["composition"])
     consumption_i = pick(["consumption", "consumptionperunit", "consumptionperunit", "consumptionperunit", "usage", "req", "required"])
+    weight_i = pick(["weight", "grammage", "g/m", "g/m2", "gsm"])
+    supplier_i = pick([
+        "materialsupply",
+        "materialsupplier",
+        "material supplier",
+        "supplier",
+        "supplierarticle",
+        "supplier article",
+    ])
+    production_unit_i = pick([
+        "productionunit",
+        "production unit",
+        "productionunits",
+        "production units",
+        "factory",
+        "mill",
+    ])
     color_i = pick(["color", "colour", "col"])
     size_i = pick(["size", "sizespec", "dimension"])
     qty_i = pick(["qty", "quantity", "consumption", "usage", "req", "required"])
@@ -116,6 +133,12 @@ def _infer_bom_columns(headers: List[str]) -> Dict[str, int]:
         cols["composition"] = int(composition_i)
     if consumption_i is not None:
         cols["consumption"] = int(consumption_i)
+    if weight_i is not None:
+        cols["weight"] = int(weight_i)
+    if supplier_i is not None:
+        cols["supplier"] = int(supplier_i)
+    if production_unit_i is not None:
+        cols["production_unit"] = int(production_unit_i)
     if color_i is not None:
         cols["color"] = int(color_i)
     if size_i is not None:
@@ -126,6 +149,64 @@ def _infer_bom_columns(headers: List[str]) -> Dict[str, int]:
         cols["uom"] = int(uom_i)
 
     return cols
+
+
+def _extract_weight_value(s: str) -> str:
+    t = _cell_str(s)
+    if not t:
+        return ""
+    tu = t.upper()
+    if re.search(r"\b\d+(?:[\.,]\d+)?\s*(?:G/M2|G/M|G/PC|G/PIECE|GSM)\b", tu) is not None:
+        return t
+    if re.search(r"\b\d+(?:[\.,]\d+)?\s*(?:GRAM)\b", tu) is not None and re.search(r"\b/\s*(?:M|M2|KM|PC|PIECE)\b", tu) is not None:
+        return t
+    return ""
+
+
+def _looks_like_supplier(s: str) -> bool:
+    tu = _cell_str(s).upper()
+    if not tu:
+        return False
+    return (
+        re.search(
+            r"\b(PT\.?|LTD\.?|LIMITED|TRADING|CO\.?|COMPANY|CORP\.?|CORPORATION|GMBH|BV|S\.A\.|S\.P\.A\.|INC\.?|LLC|CO\.,\s*LTD)\b",
+            tu,
+        )
+        is not None
+    )
+
+
+def _looks_like_consumption_value(s: str) -> bool:
+    tu = _cell_str(s).upper()
+    if not tu:
+        return False
+    # Avoid confusing composition percentages (e.g. '100% POLYESTER') as consumption.
+    if "%" in tu:
+        return False
+    if re.search(r"\b\d+(?:[\.,]\d+)?\b", tu) is None:
+        return False
+    if re.search(r"\b(PER\s*UNIT|/\s*UNIT)\b", tu) is not None:
+        return True
+    if re.search(r"\b(M|CM|MM|YD|YARD|KM|PCS|PC|EA|UNIT)\b", tu) is not None:
+        return True
+    return False
+
+
+def _quality_score_line(line: Dict[str, Any], text_fields: Optional[List[str]] = None) -> int:
+    try:
+        tf = text_fields or []
+        filled = sum(1 for v in (line or {}).values() if v not in (None, ""))
+        penalty = 0
+        for k in tf:
+            v = str((line or {}).get(k) or "")
+            if not v:
+                continue
+            penalty += max(0, len(v) - 24)
+            if sum(1 for ch in v if ch.isdigit()) >= 6:
+                penalty += 20
+        return filled * 10 - penalty
+    except Exception:
+        return 0
 
 
 def _looks_like_header_row(row: List[Any]) -> bool:
@@ -246,11 +327,13 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
 
     candidates.sort(key=lambda x: (x[0], x[1]))
 
-    def _extract_lines_from_table(tbl: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
+    def _extract_lines_from_table(
+        tbl: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
         headers = [str(h or "") for h in (tbl.get("headers") or [])]
         rm = tbl.get("rows_matrix") or []
         if not isinstance(rm, list):
-            return ([], 0)
+            return ([], [], 0)
 
         if (not headers or all(not str(h or "").strip() for h in headers)) and rm and isinstance(rm[0], list) and _looks_like_header_row(rm[0]):
             headers = [str(x or "") for x in rm[0]]
@@ -370,10 +453,12 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             pass
 
         if "material" not in cols and "description" not in cols:
-            return ([], 0)
+            return ([], [], 0)
 
-        out_lines: List[Dict[str, Any]] = []
-        local_seen = set()
+        cons_map: Dict[str, Dict[str, Any]] = {}
+        cons_q: Dict[str, int] = {}
+        prod_map: Dict[str, Dict[str, Any]] = {}
+        prod_q: Dict[str, int] = {}
         for r in rm[start_idx:]:
             if not isinstance(r, list):
                 continue
@@ -398,17 +483,70 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             desc = get("description")
             composition = get("composition")
             consumption_raw = get("consumption")
+            weight_raw = get("weight")
+            supplier = get("supplier")
+            production_unit = get("production_unit")
             qty_raw = get("qty")
             uom = _norm_uom(get("uom"))
             color = get("color")
             size = get("size")
 
+            # Fallback: if consumption column is missing/misaligned, scan row cells for a
+            # consumption-like value (e.g. '0.56 km').
+            #
+            # Important: in HM Supplementary, inferred 'consumption' column can sometimes
+            # point to 'construction', so we also scan when consumption_raw exists but does
+            # not look like consumption.
+            if (not consumption_raw) or (not _looks_like_consumption_value(consumption_raw)):
+                try:
+                    best_cc = ""
+
+                    def _is_unit_token(tok: str) -> bool:
+                        u = _norm_uom(tok)
+                        return u in {"M", "CM", "MM", "YD", "KM", "PCS", "PER", "UNIT"}
+
+                    for i_cc, cc in enumerate(cells):
+                        if not cc:
+                            continue
+                        if _extract_weight_value(cc):
+                            continue
+                        if _looks_like_consumption_value(cc):
+                            best_cc = cc
+                            break
+
+                        # Even if a cell contains composition percentages, it can also contain
+                        # consumption at the end (e.g. '80% ... 1.203 yd'). Try to detect that.
+                        if re.search(
+                            r"(-?\d+(?:[\.,]\d+)?)\s*(KM|YD|YARD|M|CM|MM|PCS|PC|EA|UNIT|PER)\b",
+                            cc.upper(),
+                        ) is not None:
+                            best_cc = cc
+                            break
+
+                        # Split case: numeric cell followed by unit cell.
+                        if re.fullmatch(r"-?\d+(?:[\.,]\d+)?", cc.replace(" ", "")) is not None:
+                            if i_cc + 1 < len(cells):
+                                uu = cells[i_cc + 1]
+                                if uu and _is_unit_token(uu):
+                                    best_cc = f"{cc} {uu}"
+                                    break
+                            if i_cc > 0:
+                                uu = cells[i_cc - 1]
+                                if uu and _is_unit_token(uu):
+                                    best_cc = f"{cc} {uu}"
+                                    break
+
+                    if best_cc:
+                        consumption_raw = best_cc
+                except Exception:
+                    pass
+
             # HM Supplementary rows sometimes have Type filled (e.g. 'Thread Trim')
             # while Material Appearance/Description cells are empty. Keep these rows
             # if they carry useful values like consumption/composition.
             if not (material or desc):
-                if typ and (composition or consumption_raw or qty_raw):
-                    desc = typ
+                if (typ or placement or position) and (composition or consumption_raw or qty_raw):
+                    desc = typ or placement or position
                 else:
                     continue
 
@@ -419,56 +557,119 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             consumption_qty = None
             consumption_uom = ""
             if consumption_raw:
-                mcons = re.search(r"(-?\d+(?:[\.,]\d+)?)", consumption_raw.replace(" ", ""))
-                if mcons:
-                    consumption_qty = _to_number(mcons.group(1))
-                mu = re.search(r"\b([A-Za-z]{1,6})\b", consumption_raw)
-                if mu:
-                    consumption_uom = _norm_uom(mu.group(1))
+                # Prefer patterns where a unit token is adjacent to a numeric value.
+                # This handles cells that contain both construction and consumption.
+                m_qty_uom = None
+                try:
+                    m_qty_uom = list(
+                        re.finditer(
+                            r"(-?\d+(?:[\.,]\d+)?)\s*(KM|YD|YARD|M|CM|MM|PCS|PC|EA|UNIT|PER)\b",
+                            consumption_raw.upper(),
+                        )
+                    )
+                except Exception:
+                    m_qty_uom = None
+                if m_qty_uom:
+                    m_last = m_qty_uom[-1]
+                    consumption_qty = _to_number(m_last.group(1))
+                    consumption_uom = _norm_uom(m_last.group(2))
+                else:
+                    mcons = re.search(r"(-?\d+(?:[\.,]\d+)?)", consumption_raw.replace(" ", ""))
+                    if mcons:
+                        consumption_qty = _to_number(mcons.group(1))
+                    mu = re.search(r"\b(KM|YD|YARD|M|CM|MM|PCS|PC|EA|UNIT|PER)\b", consumption_raw.upper())
+                    if mu:
+                        consumption_uom = _norm_uom(mu.group(1))
+                # If the value looks like a percentage (composition), don't treat it as consumption
+                # unless we also have a real unit from the uom column.
+                if "%" in consumption_raw and not (uom or consumption_uom):
+                    consumption_qty = None
+                    consumption_uom = ""
             if not uom and consumption_uom:
                 uom = consumption_uom
 
-            qty_num = _to_number(qty_raw)
-            line: Dict[str, Any] = {
-                "component": component,
-                "material": material,
-                "description": desc,
-                "composition": composition,
-                "consumption": consumption_qty if consumption_qty is not None else (consumption_raw or ""),
-                "qty": qty_num if qty_num is not None else (qty_raw or ""),
-                "uom": uom,
-                "color": color,
-                "size": size,
-            }
-            line = {k: v for k, v in line.items() if v not in (None, "")}
-            if not line:
-                continue
+            weight = _extract_weight_value(weight_raw)
+            if (not weight) and composition:
+                weight = _extract_weight_value(composition)
+            if (not weight) and consumption_raw:
+                weight = _extract_weight_value(consumption_raw)
 
-            k = (
-                _norm_key(str(line.get("material") or ""))
-                + "|"
-                + _norm_key(str(line.get("description") or ""))
-                + "|"
-                + _norm_key(str(line.get("color") or ""))
-                + "|"
-                + _norm_key(str(line.get("size") or ""))
-            )
-            if k.strip("|") and k not in local_seen:
-                local_seen.add(k)
-                out_lines.append(line)
+            qty_num = _to_number(qty_raw)
+
+            # Row-level classification
+            supplier_blob = " ".join([x for x in [supplier, production_unit, qty_raw] if x]).strip()
+            is_supplier_row = _looks_like_supplier(supplier_blob) or _looks_like_supplier(material) or _looks_like_supplier(desc)
+            # Only consider numeric-only cells as consumption when we can attach a valid unit.
+            has_consumption_unit = bool(uom or consumption_uom)
+            is_consumption_row = _looks_like_consumption_value(consumption_raw) or (consumption_qty is not None and has_consumption_unit)
+
+            # If supplier is present, it should go to Production Units.
+            if is_supplier_row:
+                line_p: Dict[str, Any] = {
+                    "component": component,
+                    "supplier": supplier or (qty_raw or ""),
+                    "composition": composition,
+                    "production_unit": production_unit,
+                    "weight": weight,
+                }
+                line_p = {k: v for k, v in line_p.items() if v not in (None, "")}
+                if line_p:
+                    kp = (
+                        _norm_key(str(line_p.get("component") or ""))
+                        + "|"
+                        + _norm_key(str(line_p.get("supplier") or ""))
+                        + "|"
+                        + _norm_key(str(line_p.get("production_unit") or ""))
+                        + "|"
+                        + _norm_key(str(line_p.get("composition") or ""))
+                    )
+                    if kp.strip("|"):
+                        q = _quality_score_line(line_p, ["supplier", "production_unit", "composition"])
+                        if (kp not in prod_map) or (q > int(prod_q.get(kp, -10**9))):
+                            prod_map[kp] = line_p
+                            prod_q[kp] = q
+
+            # If consumption exists, it must still go to Consumption BoM even if supplier exists.
+            if is_consumption_row:
+                cons_val: Any = consumption_qty if consumption_qty is not None else (consumption_raw or "")
+                line_c: Dict[str, Any] = {
+                    "component": component,
+                    "description": desc,
+                    "consumption": cons_val,
+                    "uom": uom,
+                    "weight": weight,
+                }
+                line_c = {k: v for k, v in line_c.items() if v not in (None, "")}
+                if line_c:
+                    # Dedup by component + consumption + uom. Do not include description/weight,
+                    # then pick the best-quality row (so duplicated 0.87m collapses to one).
+                    kc = (
+                        _norm_key(str(line_c.get("component") or ""))
+                        + "|"
+                        + _norm_key(str(line_c.get("consumption") or ""))
+                        + "|"
+                        + _norm_key(str(line_c.get("uom") or ""))
+                    )
+                    if kc.strip("|"):
+                        q = _quality_score_line(line_c, ["description"]) + (8 if line_c.get("weight") else 0)
+                        if (kc not in cons_map) or (q > int(cons_q.get(kc, -10**9))):
+                            cons_map[kc] = line_c
+                            cons_q[kc] = q
 
         score_out = _score_bom_table(headers, rm)
-        return (out_lines, int(score_out))
+        return (list(cons_map.values()), list(prod_map.values()), int(score_out))
 
-    merged: List[Dict[str, Any]] = []
-    seen_keys = set()
+    merged_map: Dict[str, Dict[str, Any]] = {}
+    merged_q: Dict[str, int] = {}
+    merged_prod_map: Dict[str, Dict[str, Any]] = {}
+    merged_prod_q: Dict[str, int] = {}
     sources: List[Dict[str, Any]] = []
     best_score = 0
     best_kind = None
 
     for page_i, neg_score, t in candidates:
-        lines_i, score_i = _extract_lines_from_table(t)
-        if not lines_i:
+        lines_i, prod_i, score_i = _extract_lines_from_table(t)
+        if not lines_i and not prod_i:
             continue
         if score_i > best_score:
             best_score = score_i
@@ -482,25 +683,45 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
         )
         for line in lines_i:
             k = (
-                _norm_key(str(line.get("material") or ""))
+                _norm_key(str(line.get("component") or ""))
                 + "|"
-                + _norm_key(str(line.get("description") or ""))
+                + _norm_key(str(line.get("consumption") or ""))
                 + "|"
-                + _norm_key(str(line.get("color") or ""))
-                + "|"
-                + _norm_key(str(line.get("size") or ""))
+                + _norm_key(str(line.get("uom") or ""))
             )
             if not k.strip("|"):
                 continue
-            if k in seen_keys:
-                continue
-            seen_keys.add(k)
-            merged.append(line)
+            q = _quality_score_line(line, ["description"]) + (8 if line.get("weight") else 0)
+            if (k not in merged_map) or (q > int(merged_q.get(k, -10**9))):
+                merged_map[k] = line
+                merged_q[k] = q
 
-    if not merged:
+        for line in prod_i:
+            kp = (
+                _norm_key(str(line.get("component") or ""))
+                + "|"
+                + _norm_key(str(line.get("supplier") or ""))
+                + "|"
+                + _norm_key(str(line.get("production_unit") or ""))
+                + "|"
+                + _norm_key(str(line.get("composition") or ""))
+            )
+            if not kp.strip("|"):
+                continue
+            q = _quality_score_line(line, ["supplier", "production_unit", "composition"])
+            if (kp not in merged_prod_map) or (q > int(merged_prod_q.get(kp, -10**9))):
+                merged_prod_map[kp] = line
+                merged_prod_q[kp] = q
+
+    merged = list(merged_map.values())
+    merged_prod = list(merged_prod_map.values())
+
+    if not merged and not merged_prod:
         return None
 
     out: Dict[str, Any] = {"lines": merged, "source": {"table_kind": best_kind, "score": best_score}}
+    if merged_prod:
+        out["production_units_lines"] = merged_prod
     if len(sources) > 1:
         out["sources"] = sources
     return out
