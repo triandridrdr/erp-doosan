@@ -35,6 +35,8 @@ def _norm_uom(u: str) -> str:
         "EA": "PCS",
         "EACH": "PCS",
         "UNIT": "PCS",
+        "PERUNIT": "PER",
+        "PER": "PER",
         "M": "M",
         "MTR": "M",
         "METER": "M",
@@ -43,6 +45,7 @@ def _norm_uom(u: str) -> str:
         "MM": "MM",
         "YD": "YD",
         "YARD": "YD",
+        "KM": "KM",
         "FT": "FT",
         "KG": "KG",
         "G": "G",
@@ -400,8 +403,14 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             color = get("color")
             size = get("size")
 
+            # HM Supplementary rows sometimes have Type filled (e.g. 'Thread Trim')
+            # while Material Appearance/Description cells are empty. Keep these rows
+            # if they carry useful values like consumption/composition.
             if not (material or desc):
-                continue
+                if typ and (composition or consumption_raw or qty_raw):
+                    desc = typ
+                else:
+                    continue
 
             component = " ".join([x for x in [position, placement, typ] if x]).strip()
             if not component:
