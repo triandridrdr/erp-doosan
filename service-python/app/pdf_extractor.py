@@ -30,6 +30,7 @@ def try_pdf_digital_fastpath(
     dedup_top_level_ai_kv_tables: Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]],
     build_sales_order_payload: Callable[[List[Dict[str, Any]]], Dict[str, Any]],
     parse_total_order_from_text: Callable[[str], Optional[Dict[str, Any]]],
+    parse_size_per_colour_breakdown_from_text: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
 ) -> Optional[Dict[str, Any]]:
     def _is_hm_supplementary(text: str, filename0: str) -> bool:
         try:
@@ -476,6 +477,92 @@ def try_pdf_digital_fastpath(
                             normalize_size_grid_columns(t)
                 except Exception:
                     pass
+            else:
+                # Template-specific fallback: SizePerColourBreakdown provides Assortment/Solid/Total blocks.
+                try:
+                    text_blob = "\n".join(combined_texts)
+                    has_breakdown_markers = (
+                        re.search(r"\bAssortment\b", text_blob or "", flags=re.IGNORECASE) is not None
+                        and re.search(r"\bSolid\b", text_blob or "", flags=re.IGNORECASE) is not None
+                        and re.search(r"\bTotal\b", text_blob or "", flags=re.IGNORECASE) is not None
+                    )
+
+                    try:
+                        logger.info(
+                            "size_per_colour_breakdown_try %s",
+                            json.dumps(
+                                {
+                                    "event": "size_per_colour_breakdown_try",
+                                    "request_id": request_id,
+                                    "filename": filename,
+                                    "embedded_text_len": len(text_blob or ""),
+                                    "has_breakdown_markers": bool(has_breakdown_markers),
+                                    "has_parser": parse_size_per_colour_breakdown_from_text is not None,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    except Exception:
+                        pass
+
+                    if (
+                        parse_size_per_colour_breakdown_from_text is not None
+                        and (
+                            re.search(r"SizePerColourBreakdown", filename or "", flags=re.IGNORECASE) is not None
+                            or has_breakdown_markers
+                        )
+                    ):
+                        parsed2 = parse_size_per_colour_breakdown_from_text(text_blob)
+                    else:
+                        parsed2 = None
+                except Exception:
+                    parsed2 = None
+
+                try:
+                    logger.info(
+                        "size_per_colour_breakdown_try_result %s",
+                        json.dumps(
+                            {
+                                "event": "size_per_colour_breakdown_try_result",
+                                "request_id": request_id,
+                                "filename": filename,
+                                "parsed": isinstance(parsed2, dict),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                except Exception:
+                    pass
+
+                if isinstance(parsed2, dict):
+                    try:
+                        rr = parsed2.get("rows")
+                        logger.info(
+                            "size_per_colour_breakdown_parsed %s",
+                            json.dumps(
+                                {
+                                    "event": "size_per_colour_breakdown_parsed",
+                                    "request_id": request_id,
+                                    "filename": filename,
+                                    "row_count": len(rr) if isinstance(rr, list) else None,
+                                    "row_names": [str(r.get("COLOUR") or "") for r in (rr or [])[:6] if isinstance(r, dict)]
+                                    if isinstance(rr, list)
+                                    else None,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    except Exception:
+                        pass
+
+                    combined_tables.append(parsed2)
+                    combined_tables = [table_add_rows_matrix(t) for t in combined_tables]
+                    try:
+                        for t in combined_tables:
+                            if isinstance(t, dict) and str(t.get("table_kind") or "").strip().lower() == "total_order_grid":
+                                normalize_size_grid_columns(t)
+                    except Exception:
+                        pass
     except Exception:
         pass
 

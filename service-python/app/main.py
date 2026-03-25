@@ -891,6 +891,192 @@ def _parse_total_order_from_text(txt: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, Any]]:
+    """Parse HM SizePerColourBreakdown PDFs that list Assortment/Solid/Total blocks.
+
+    Output is normalized into a pseudo total_order_grid table with COLOUR rows:
+    ASSORTMENT, SOLID, TOTAL.
+    """
+    try:
+        if not isinstance(txt, str) or not txt.strip():
+            return None
+
+        s = txt.replace("\r", "\n")
+        s = re.sub(r"\u00A0", " ", s)
+        lines = [re.sub(r"\s+", " ", ln).strip() for ln in s.split("\n")]
+        lines = [ln for ln in lines if ln]
+        if not lines:
+            return None
+
+        dbg_breakdown = str(os.getenv("DEBUG_SIZE_BREAKDOWN") or "").strip().lower() in {"1", "true", "yes", "on"}
+        dbg_uv = logging.getLogger("uvicorn.error")
+
+        def _canon_num(s0: str) -> str:
+            try:
+                t = str(s0 or "").strip()
+                if not t:
+                    return ""
+                # normalize thousands with spaces/commas (e.g. '2 199' or '2, 199')
+                t = re.sub(r"(\d)\s*,\s+(\d{3})\b", r"\1,\2", t)
+                t = re.sub(r"(\d)\s+(\d{3})\b", r"\1,\2", t)
+                t = re.sub(r"[^0-9,\.]+", "", t)
+                c = _canon_num_token(t)
+                return c or ""
+            except Exception:
+                return ""
+
+        sections = {"ASSORTMENT": {}, "SOLID": {}, "TOTAL": {}}
+        cur = ""
+
+        # Match tokens like: 'XS (XS)* 385' or 'XL (XL)* 302'
+        # Some embedded text exports may put multiple size tokens on one line.
+        # Prefer explicit '(XS)' style, but OCR text may omit parentheses.
+        size_line_re = re.compile(
+            r"\b(XS|S|M|L|XL)\b\s*\([^\)]*\)\s*\*?\s*([0-9][0-9\s,\.]*)\b",
+            flags=re.IGNORECASE,
+        )
+        size_line_re2 = re.compile(
+            r"\b(XS|S|M|L|XL)\b[^0-9]{0,12}([0-9][0-9\s,\.]*)\b",
+            flags=re.IGNORECASE,
+        )
+        qty_re = re.compile(r"\bQuantity\s*:??\s*([0-9][0-9\s,\.]*)\b", flags=re.IGNORECASE)
+
+        saw_section = False
+        saw_qty = False
+        match_paren = 0
+        match_loose = 0
+        marker_hits: List[str] = []
+        sample_lines: List[str] = []
+
+        def _maybe_switch_section(line: str, cur0: str) -> Tuple[str, str, bool]:
+            """Return (new_cur, remainder_line, switched)."""
+            try:
+                s0 = str(line or "")
+                # Prefer exact line markers
+                u0 = s0.upper().strip()
+                if u0 in {"ASSORTMENT", "SOLID", "TOTAL"}:
+                    if dbg_breakdown:
+                        marker_hits.append(u0)
+                    return u0, "", True
+
+                # OCR sometimes merges marker + sizes into one line.
+                for name in ["ASSORTMENT", "SOLID", "TOTAL"]:
+                    m = re.search(r"\b" + re.escape(name) + r"\b", u0, flags=re.IGNORECASE)
+                    if m is None:
+                        continue
+                    # Keep parsing the remainder of the same line after the marker
+                    rem = s0[m.end() :].strip()
+                    if dbg_breakdown:
+                        marker_hits.append(name)
+                    return name, rem, True
+
+                return cur0, s0, False
+            except Exception:
+                return cur0, str(line or ""), False
+
+        for ln in lines:
+            cur, ln2, switched = _maybe_switch_section(ln, cur)
+            if switched:
+                saw_section = True
+            # If we just switched and the line had no remainder, continue to next line.
+            if not ln2.strip():
+                if not cur:
+                    continue
+                # marker-only line
+                continue
+            if not cur:
+                continue
+
+            ln = ln2
+
+            if dbg_breakdown and len(sample_lines) < 40:
+                if re.search(r"\b(ASSORTMENT|SOLID|TOTAL|QUANTITY|XS|XL|\bS\b|\bM\b|\bL\b)\b", ln, flags=re.IGNORECASE) is not None:
+                    sample_lines.append(ln)
+
+            mq = qty_re.search(ln)
+            if mq:
+                sections[cur]["Total"] = _canon_num(mq.group(1) or "")
+                saw_qty = True
+                continue
+
+            any_size = False
+            for ms in size_line_re.finditer(ln):
+                any_size = True
+                match_paren += 1
+                k = (ms.group(1) or "").upper().strip()
+                v = _canon_num(ms.group(2) or "")
+                if k and v:
+                    sections[cur][k] = v
+            if not any_size:
+                for ms in size_line_re2.finditer(ln):
+                    any_size = True
+                    match_loose += 1
+                    k = (ms.group(1) or "").upper().strip()
+                    v = _canon_num(ms.group(2) or "")
+                    if k and v:
+                        sections[cur][k] = v
+            if any_size:
+                continue
+
+        if dbg_breakdown:
+            payload_dbg = {
+                "event": "debug_size_breakdown_scan",
+                "line_count": len(lines),
+                "saw_section": bool(saw_section),
+                "marker_hits": marker_hits[:20],
+                "saw_qty": bool(saw_qty),
+                "match_paren": match_paren,
+                "match_loose": match_loose,
+                "section_keys": {k: sorted(list((sections.get(k) or {}).keys())) for k in ["ASSORTMENT", "SOLID", "TOTAL"]},
+                "sample_lines": sample_lines[:25],
+            }
+            try:
+                dbg_uv.info("debug_size_breakdown_scan %s", json.dumps(payload_dbg, ensure_ascii=False))
+            except Exception:
+                pass
+            try:
+                print("debug_size_breakdown_scan", json.dumps(payload_dbg, ensure_ascii=False))
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+        # Require at least one section with at least 2 size values.
+        ok_any = any(sum(1 for k in ["XS", "S", "M", "L", "XL"] if str(sec.get(k) or "").strip()) >= 2 for sec in sections.values())
+        if not ok_any:
+            return None
+
+        rows: List[Dict[str, str]] = []
+        for sec_name in ["ASSORTMENT", "SOLID", "TOTAL"]:
+            sec = sections.get(sec_name) or {}
+            if not isinstance(sec, dict):
+                continue
+            row: Dict[str, str] = {
+                "COLOUR": sec_name,
+                "XS": str(sec.get("XS") or "").strip(),
+                "S": str(sec.get("S") or "").strip(),
+                "M": str(sec.get("M") or "").strip(),
+                "L": str(sec.get("L") or "").strip(),
+                "XL": str(sec.get("XL") or "").strip(),
+                "Total": str(sec.get("Total") or "").strip(),
+            }
+            # skip fully empty rows
+            if any(v for k, v in row.items() if k != "COLOUR" and str(v or "").strip()):
+                rows.append(row)
+
+        if not rows:
+            return None
+
+        return {
+            "headers": ["COLOUR", "XS", "S", "M", "L", "XL", "Total"],
+            "rows": rows,
+            "table_kind": "total_order_grid",
+            "include_headers_in_rows_matrix": True,
+            "_source": "pdf_text_size_per_colour_breakdown",
+        }
+    except Exception:
+        return None
+
+
 def _cluster_1d(values: List[float], tol: float) -> List[float]:
     if not values:
         return []
@@ -2920,6 +3106,93 @@ def _extract_tables_from_paddle_page(image_gray_or_bgr: np.ndarray, page_res: Di
                     _normalize_size_grid_columns(reconstructed)
                 except Exception:
                     pass
+            else:
+                try:
+                    blob = "\n".join(combined_texts)
+                    has_markers = (
+                        re.search(r"\bAssortment\b", blob or "", flags=re.IGNORECASE) is not None
+                        and re.search(r"\bSolid\b", blob or "", flags=re.IGNORECASE) is not None
+                        and re.search(r"\bTotal\b", blob or "", flags=re.IGNORECASE) is not None
+                    )
+                    logging.getLogger("uvicorn.error").info(
+                        "so_grid_fallback_try_breakdown %s",
+                        json.dumps(
+                            {
+                                "event": "so_grid_fallback_try_breakdown",
+                                "request_id": request_id,
+                                "filename": filename,
+                                "has_breakdown_markers": bool(has_markers),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    if str(os.getenv("DEBUG_SIZE_BREAKDOWN") or "").strip().lower() in {"1", "true", "yes", "on"}:
+                        print(
+                            "so_grid_fallback_try_breakdown",
+                            json.dumps(
+                                {
+                                    "event": "so_grid_fallback_try_breakdown",
+                                    "request_id": request_id,
+                                    "filename": filename,
+                                    "has_breakdown_markers": bool(has_markers) if 'has_markers' in locals() else None,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                        sys.stdout.flush()
+                except Exception:
+                    pass
+                parsed2 = _parse_size_per_colour_breakdown_from_text("\n".join(combined_texts))
+                if isinstance(parsed2, dict):
+                    try:
+                        rr = parsed2.get("rows")
+                        logger.info(
+                            "size_per_colour_breakdown_parsed %s",
+                            json.dumps(
+                                {
+                                    "event": "size_per_colour_breakdown_parsed",
+                                    "request_id": request_id,
+                                    "filename": filename,
+                                    "row_count": len(rr) if isinstance(rr, list) else None,
+                                    "row_names": [str(r.get("COLOUR") or "") for r in (rr or [])[:6] if isinstance(r, dict)]
+                                    if isinstance(rr, list)
+                                    else None,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    except Exception:
+                        pass
+
+                    try:
+                        rr = parsed2.get("rows")
+                        logging.getLogger("uvicorn.error").info(
+                            "so_grid_fallback_breakdown_ok %s",
+                            json.dumps(
+                                {
+                                    "event": "so_grid_fallback_breakdown_ok",
+                                    "request_id": request_id,
+                                    "filename": filename,
+                                    "row_count": len(rr) if isinstance(rr, list) else None,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    except Exception:
+                        pass
+
+                    combined_tables.append(parsed2)
+                    combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
+                    try:
+                        for t in combined_tables:
+                            if isinstance(t, dict) and str(t.get("table_kind") or "").strip().lower() == "total_order_grid":
+                                _normalize_size_grid_columns(t)
+                    except Exception:
+                        pass
     except Exception:
         pass
     reconstructed["table_index"] = 1
@@ -6263,6 +6536,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                     dedup_top_level_ai_kv_tables=_dedup_top_level_ai_kv_tables,
                     build_sales_order_payload=_build_sales_order_payload,
                     parse_total_order_from_text=_parse_total_order_from_text,
+                    parse_size_per_colour_breakdown_from_text=_parse_size_per_colour_breakdown_from_text,
                 )
                 if isinstance(out_fast, dict):
                     return out_fast
@@ -6740,8 +7014,48 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload0 = _build_sales_order_payload(combined_tables)
         grid0 = ((payload0.get("total_order") or {}).get("grid")) if isinstance(payload0, dict) else None
         if not (isinstance(grid0, list) and len(grid0) > 0):
+            try:
+                logging.getLogger("uvicorn.error").info(
+                    "so_grid_fallback_start %s",
+                    json.dumps(
+                        {
+                            "event": "so_grid_fallback_start",
+                            "request_id": request_id,
+                            "filename": filename,
+                            "grid0_len": len(grid0) if isinstance(grid0, list) else None,
+                            "combined_text_len": len("\n".join(combined_texts) or ""),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            except Exception:
+                pass
+
             parsed = _parse_total_order_from_text("\n".join(combined_texts))
+            parsed_rows_ok = False
             if isinstance(parsed, dict):
+                try:
+                    rr0 = parsed.get("rows")
+                    parsed_rows_ok = isinstance(rr0, list) and len(rr0) > 0
+                except Exception:
+                    parsed_rows_ok = False
+
+            if isinstance(parsed, dict) and parsed_rows_ok:
+                try:
+                    logging.getLogger("uvicorn.error").info(
+                        "so_grid_fallback_total_order_ok %s",
+                        json.dumps(
+                            {
+                                "event": "so_grid_fallback_total_order_ok",
+                                "request_id": request_id,
+                                "filename": filename,
+                                "row_count": len(parsed.get("rows") or []) if isinstance(parsed.get("rows"), list) else None,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                except Exception:
+                    pass
                 unit_lot = parsed.get("unit_lot") if isinstance(parsed.get("unit_lot"), str) else None
                 if unit_lot is not None:
                     try:
@@ -6759,6 +7073,36 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                             _normalize_size_grid_columns(t)
                 except Exception:
                     pass
+            else:
+                parsed2 = _parse_size_per_colour_breakdown_from_text("\n".join(combined_texts))
+                if isinstance(parsed2, dict):
+                    try:
+                        rr = parsed2.get("rows")
+                        logger.info(
+                            "size_per_colour_breakdown_parsed %s",
+                            json.dumps(
+                                {
+                                    "event": "size_per_colour_breakdown_parsed",
+                                    "request_id": request_id,
+                                    "filename": filename,
+                                    "row_count": len(rr) if isinstance(rr, list) else None,
+                                    "row_names": [str(r.get("COLOUR") or "") for r in (rr or [])[:6] if isinstance(r, dict)]
+                                    if isinstance(rr, list)
+                                    else None,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    combined_tables.append(parsed2)
+                    combined_tables = [_table_add_rows_matrix(t) for t in combined_tables]
+                    try:
+                        for t in combined_tables:
+                            if isinstance(t, dict) and str(t.get("table_kind") or "").strip().lower() == "total_order_grid":
+                                _normalize_size_grid_columns(t)
+                    except Exception:
+                        pass
     except Exception:
         pass
 
@@ -7405,6 +7749,28 @@ async def ocr_extract(
         filename = request.headers.get("x-filename") or "uploaded"
         file_bytes = await request.body()
 
+    try:
+        _fname_msg = json.dumps(
+            {
+                "event": "ocr_extract_filename",
+                "request_id": request_id,
+                "filename": filename,
+                "content_type": content_type,
+                "engine": engine,
+            },
+            ensure_ascii=False,
+        )
+        try:
+            logger.info("ocr_extract_filename %s", _fname_msg)
+        except Exception:
+            pass
+        try:
+            logging.getLogger("uvicorn.error").info("ocr_extract_filename %s", _fname_msg)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     if not file_bytes:
         raise HTTPException(
             status_code=400,
@@ -7481,8 +7847,32 @@ async def ocr_extract(
                     dedup_top_level_ai_kv_tables=_dedup_top_level_ai_kv_tables,
                     build_sales_order_payload=_build_sales_order_payload,
                     parse_total_order_from_text=_parse_total_order_from_text,
+                    parse_size_per_colour_breakdown_from_text=_parse_size_per_colour_breakdown_from_text,
                 )
                 if isinstance(out_fast, dict):
+                    try:
+                        so0 = out_fast.get("sales_order_payload") if isinstance(out_fast.get("sales_order_payload"), dict) else None
+                        g0 = None
+                        if isinstance(so0, dict):
+                            to0 = so0.get("total_order") if isinstance(so0.get("total_order"), dict) else None
+                            if isinstance(to0, dict):
+                                g0 = to0.get("grid")
+                        g0_list = g0 if isinstance(g0, list) else []
+                        logger.info(
+                            "size_breakdown_grid_snapshot_fastpath %s",
+                            json.dumps(
+                                {
+                                    "event": "size_breakdown_grid_snapshot_fastpath",
+                                    "request_id": request_id,
+                                    "filename": filename,
+                                    "grid_len": len(g0_list),
+                                    "sample": g0_list[0] if (len(g0_list) > 0 and isinstance(g0_list[0], dict)) else None,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    except Exception:
+                        pass
                     return JSONResponse(out_fast)
             except Exception:
                 pass
@@ -7742,9 +8132,43 @@ async def ocr_extract(
     try:
         payload0 = _build_sales_order_payload(combined_tables)
         grid0 = ((payload0.get("total_order") or {}).get("grid")) if isinstance(payload0, dict) else None
+        try:
+            g0 = grid0 if isinstance(grid0, list) else []
+            sample = g0[0] if (isinstance(g0, list) and len(g0) > 0 and isinstance(g0[0], dict)) else None
+            _grid_msg = json.dumps(
+                {
+                    "event": "size_breakdown_grid_snapshot",
+                    "request_id": request_id,
+                    "filename": filename,
+                    "grid_len": len(g0) if isinstance(g0, list) else None,
+                    "sample_keys": sorted(list(sample.keys()))[:20] if isinstance(sample, dict) else None,
+                    "sample_values": {k: sample.get(k) for k in ["COLOUR", "XS", "S", "M", "L", "XL", "Total"]}
+                    if isinstance(sample, dict)
+                    else None,
+                },
+                ensure_ascii=False,
+            )
+            try:
+                logger.info("size_breakdown_grid_snapshot %s", _grid_msg)
+            except Exception:
+                pass
+            try:
+                logging.getLogger("uvicorn.error").info("size_breakdown_grid_snapshot %s", _grid_msg)
+            except Exception:
+                pass
+        except Exception:
+            pass
         if not (isinstance(grid0, list) and len(grid0) > 0):
             parsed = _parse_total_order_from_text("\n".join(combined_texts))
+            parsed_rows_ok = False
             if isinstance(parsed, dict):
+                try:
+                    rr0 = parsed.get("rows")
+                    parsed_rows_ok = isinstance(rr0, list) and len(rr0) > 0
+                except Exception:
+                    parsed_rows_ok = False
+
+            if isinstance(parsed, dict) and parsed_rows_ok:
                 unit_lot = parsed.get("unit_lot") if isinstance(parsed.get("unit_lot"), str) else None
                 if unit_lot is not None:
                     try:
@@ -7870,6 +8294,33 @@ async def ocr_extract(
             bom_payload = build_bom_payload(tables=combined_tables)
     except Exception:
         bom_payload = None
+
+    try:
+        g0 = None
+        if isinstance(sales_order_payload, dict):
+            to0 = sales_order_payload.get("total_order") if isinstance(sales_order_payload.get("total_order"), dict) else None
+            if isinstance(to0, dict):
+                g0 = to0.get("grid")
+        g0_list = g0 if isinstance(g0, list) else []
+        sample = g0_list[0] if (len(g0_list) > 0 and isinstance(g0_list[0], dict)) else None
+        logger.info(
+            "size_breakdown_grid_final %s",
+            json.dumps(
+                {
+                    "event": "size_breakdown_grid_final",
+                    "request_id": request_id,
+                    "filename": filename,
+                    "grid_len": len(g0_list),
+                    "sample_keys": sorted(list(sample.keys()))[:20] if isinstance(sample, dict) else None,
+                    "sample_values": {k: sample.get(k) for k in ["COLOUR", "XS", "S", "M", "L", "XL", "Total"]}
+                    if isinstance(sample, dict)
+                    else None,
+                },
+                ensure_ascii=False,
+            ),
+        )
+    except Exception:
+        pass
 
     # HM Supplementary: fix header grouping and BOM extraction when Tabula fast-path fails and OCR KV becomes contaminated.
     try:
