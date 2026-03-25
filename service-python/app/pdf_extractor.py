@@ -457,9 +457,41 @@ def try_pdf_digital_fastpath(
     try:
         payload0 = build_sales_order_payload(combined_tables)
         grid0 = ((payload0.get("total_order") or {}).get("grid")) if isinstance(payload0, dict) else None
-        if not (isinstance(grid0, list) and len(grid0) > 0):
+
+        def _grid_has_any_qty(g: Any) -> bool:
+            if not isinstance(g, list):
+                return False
+            qty_keys = {"XS", "S", "M", "L", "XL", "TOTAL", "Total", "total", "xs", "s", "m", "l", "xl"}
+            for r in g:
+                if not isinstance(r, dict):
+                    continue
+                for k, v in r.items():
+                    if str(k or "").strip() not in qty_keys:
+                        continue
+                    sv = str(v or "").strip()
+                    if not sv:
+                        continue
+                    try:
+                        vv = float(re.sub(r"[^0-9.+-]", "", sv) or "0")
+                    except Exception:
+                        vv = 0.0
+                    if vv > 0:
+                        return True
+            return False
+
+        grid0_ok = isinstance(grid0, list) and len(grid0) > 0 and _grid_has_any_qty(grid0)
+
+        if not grid0_ok:
             parsed = parse_total_order_from_text("\n".join(combined_texts))
+            parsed_rows_ok = False
             if isinstance(parsed, dict):
+                try:
+                    rr0 = parsed.get("rows")
+                    parsed_rows_ok = isinstance(rr0, list) and len(rr0) > 0 and _grid_has_any_qty(rr0)
+                except Exception:
+                    parsed_rows_ok = False
+
+            if isinstance(parsed, dict) and parsed_rows_ok:
                 unit_lot = parsed.get("unit_lot") if isinstance(parsed.get("unit_lot"), str) else None
                 if unit_lot is not None:
                     try:
@@ -552,6 +584,19 @@ def try_pdf_digital_fastpath(
                                 ensure_ascii=False,
                             ),
                         )
+                    except Exception:
+                        pass
+
+                    try:
+                        # Remove existing TOTAL ORDER grids (often empty) so the breakdown grid becomes authoritative.
+                        combined_tables = [
+                            t
+                            for t in combined_tables
+                            if not (
+                                isinstance(t, dict)
+                                and str(t.get("table_kind") or "").strip().lower() == "total_order_grid"
+                            )
+                        ]
                     except Exception:
                         pass
 

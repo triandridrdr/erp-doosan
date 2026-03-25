@@ -925,8 +925,9 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
             except Exception:
                 return ""
 
-        sections = {"ASSORTMENT": {}, "SOLID": {}, "TOTAL": {}}
+        sec_candidates: Dict[str, List[Dict[str, str]]] = {"ASSORTMENT": [], "SOLID": [], "TOTAL": []}
         cur = ""
+        cur_map: Dict[str, str] = {}
 
         # Match tokens like: 'XS (XS)* 385' or 'XL (XL)* 302'
         # Some embedded text exports may put multiple size tokens on one line.
@@ -974,10 +975,26 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
             except Exception:
                 return cur0, str(line or ""), False
 
+        def _commit_candidate(sec_name: str, m: Dict[str, str]) -> None:
+            try:
+                if not sec_name:
+                    return
+                if sec_name not in sec_candidates:
+                    return
+                if not isinstance(m, dict):
+                    return
+                if any(str(m.get(k) or "").strip() for k in ["XS", "S", "M", "L", "XL", "Total"]):
+                    sec_candidates[sec_name].append(dict(m))
+            except Exception:
+                return
+
         for ln in lines:
+            prev = cur
             cur, ln2, switched = _maybe_switch_section(ln, cur)
             if switched:
                 saw_section = True
+                _commit_candidate(prev, cur_map)
+                cur_map = {}
             # If we just switched and the line had no remainder, continue to next line.
             if not ln2.strip():
                 if not cur:
@@ -995,7 +1012,7 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
 
             mq = qty_re.search(ln)
             if mq:
-                sections[cur]["Total"] = _canon_num(mq.group(1) or "")
+                cur_map["Total"] = _canon_num(mq.group(1) or "")
                 saw_qty = True
                 continue
 
@@ -1006,7 +1023,7 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
                 k = (ms.group(1) or "").upper().strip()
                 v = _canon_num(ms.group(2) or "")
                 if k and v:
-                    sections[cur][k] = v
+                    cur_map[k] = v
             if not any_size:
                 for ms in size_line_re2.finditer(ln):
                     any_size = True
@@ -1014,11 +1031,19 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
                     k = (ms.group(1) or "").upper().strip()
                     v = _canon_num(ms.group(2) or "")
                     if k and v:
-                        sections[cur][k] = v
+                        cur_map[k] = v
             if any_size:
                 continue
 
+        _commit_candidate(cur, cur_map)
+
         if dbg_breakdown:
+            best_keys = {}
+            try:
+                for nm in ["ASSORTMENT", "SOLID", "TOTAL"]:
+                    best_keys[nm] = [sorted(list(m.keys())) for m in (sec_candidates.get(nm) or [])[:3]]
+            except Exception:
+                best_keys = {}
             payload_dbg = {
                 "event": "debug_size_breakdown_scan",
                 "line_count": len(lines),
@@ -1027,7 +1052,7 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
                 "saw_qty": bool(saw_qty),
                 "match_paren": match_paren,
                 "match_loose": match_loose,
-                "section_keys": {k: sorted(list((sections.get(k) or {}).keys())) for k in ["ASSORTMENT", "SOLID", "TOTAL"]},
+                "section_keys": {k: [sorted(list(m.keys())) for m in (sec_candidates.get(k) or [])[:3]] for k in ["ASSORTMENT", "SOLID", "TOTAL"]},
                 "sample_lines": sample_lines[:25],
             }
             try:
@@ -1041,15 +1066,48 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
                 pass
 
         # Require at least one section with at least 2 size values.
-        ok_any = any(sum(1 for k in ["XS", "S", "M", "L", "XL"] if str(sec.get(k) or "").strip()) >= 2 for sec in sections.values())
+        ok_any = any(
+            any(
+                sum(1 for k in ["XS", "S", "M", "L", "XL"] if str(m.get(k) or "").strip()) >= 2
+                for m in (sec_candidates.get(nm) or [])
+            )
+            for nm in ["ASSORTMENT", "SOLID", "TOTAL"]
+        )
         if not ok_any:
             return None
 
         rows: List[Dict[str, str]] = []
+
+        def _score_candidate(m: Dict[str, str]) -> float:
+            try:
+                t = str(m.get("Total") or "").strip()
+                if t:
+                    return float(re.sub(r"[^0-9.+-]", "", t) or "0")
+            except Exception:
+                pass
+            ssum = 0.0
+            for kk in ["XS", "S", "M", "L", "XL"]:
+                try:
+                    vv = float(re.sub(r"[^0-9.+-]", "", str(m.get(kk) or "").strip()) or "0")
+                except Exception:
+                    vv = 0.0
+                ssum += vv
+            return float(ssum)
+
         for sec_name in ["ASSORTMENT", "SOLID", "TOTAL"]:
-            sec = sections.get(sec_name) or {}
-            if not isinstance(sec, dict):
+            cands = sec_candidates.get(sec_name) or []
+            if not isinstance(cands, list) or not cands:
                 continue
+            best = None
+            best_score = -1.0
+            for m in cands:
+                if not isinstance(m, dict):
+                    continue
+                sc = _score_candidate(m)
+                if sc > best_score:
+                    best_score = sc
+                    best = m
+            sec = best or {}
             row: Dict[str, str] = {
                 "COLOUR": sec_name,
                 "XS": str(sec.get("XS") or "").strip(),
@@ -6515,6 +6573,22 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         if try_pdf_digital_fastpath is not None:
             try:
+                try:
+                    _msg_fp_try = json.dumps(
+                        {
+                            "event": "pdf_fastpath_try",
+                            "request_id": request_id,
+                            "filename": filename,
+                        },
+                        ensure_ascii=False,
+                    )
+                    logger.info("pdf_fastpath_try %s", _msg_fp_try)
+                    try:
+                        logging.getLogger("uvicorn.error").info("pdf_fastpath_try %s", _msg_fp_try)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
                 out_fast = try_pdf_digital_fastpath(
                     request_id=request_id,
                     filename=filename,
@@ -7826,6 +7900,20 @@ async def ocr_extract(
 
         if try_pdf_digital_fastpath is not None:
             try:
+                try:
+                    logger.info(
+                        "pdf_fastpath_try %s",
+                        json.dumps(
+                            {
+                                "event": "pdf_fastpath_try",
+                                "request_id": request_id,
+                                "filename": filename,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                except Exception:
+                    pass
                 out_fast = try_pdf_digital_fastpath(
                     request_id=request_id,
                     filename=filename,
@@ -7849,6 +7937,24 @@ async def ocr_extract(
                     parse_total_order_from_text=_parse_total_order_from_text,
                     parse_size_per_colour_breakdown_from_text=_parse_size_per_colour_breakdown_from_text,
                 )
+                try:
+                    _msg_fp_res = json.dumps(
+                        {
+                            "event": "pdf_fastpath_result",
+                            "request_id": request_id,
+                            "filename": filename,
+                            "type": type(out_fast).__name__,
+                            "is_dict": isinstance(out_fast, dict),
+                        },
+                        ensure_ascii=False,
+                    )
+                    logger.info("pdf_fastpath_result %s", _msg_fp_res)
+                    try:
+                        logging.getLogger("uvicorn.error").info("pdf_fastpath_result %s", _msg_fp_res)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
                 if isinstance(out_fast, dict):
                     try:
                         so0 = out_fast.get("sales_order_payload") if isinstance(out_fast.get("sales_order_payload"), dict) else None
@@ -7858,19 +7964,21 @@ async def ocr_extract(
                             if isinstance(to0, dict):
                                 g0 = to0.get("grid")
                         g0_list = g0 if isinstance(g0, list) else []
-                        logger.info(
-                            "size_breakdown_grid_snapshot_fastpath %s",
-                            json.dumps(
-                                {
-                                    "event": "size_breakdown_grid_snapshot_fastpath",
-                                    "request_id": request_id,
-                                    "filename": filename,
-                                    "grid_len": len(g0_list),
-                                    "sample": g0_list[0] if (len(g0_list) > 0 and isinstance(g0_list[0], dict)) else None,
-                                },
-                                ensure_ascii=False,
-                            ),
+                        _msg_fp_grid = json.dumps(
+                            {
+                                "event": "size_breakdown_grid_snapshot_fastpath",
+                                "request_id": request_id,
+                                "filename": filename,
+                                "grid_len": len(g0_list),
+                                "sample": g0_list[0] if (len(g0_list) > 0 and isinstance(g0_list[0], dict)) else None,
+                            },
+                            ensure_ascii=False,
                         )
+                        logger.info("size_breakdown_grid_snapshot_fastpath %s", _msg_fp_grid)
+                        try:
+                            logging.getLogger("uvicorn.error").info("size_breakdown_grid_snapshot_fastpath %s", _msg_fp_grid)
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     return JSONResponse(out_fast)
@@ -8303,22 +8411,24 @@ async def ocr_extract(
                 g0 = to0.get("grid")
         g0_list = g0 if isinstance(g0, list) else []
         sample = g0_list[0] if (len(g0_list) > 0 and isinstance(g0_list[0], dict)) else None
-        logger.info(
-            "size_breakdown_grid_final %s",
-            json.dumps(
-                {
-                    "event": "size_breakdown_grid_final",
-                    "request_id": request_id,
-                    "filename": filename,
-                    "grid_len": len(g0_list),
-                    "sample_keys": sorted(list(sample.keys()))[:20] if isinstance(sample, dict) else None,
-                    "sample_values": {k: sample.get(k) for k in ["COLOUR", "XS", "S", "M", "L", "XL", "Total"]}
-                    if isinstance(sample, dict)
-                    else None,
-                },
-                ensure_ascii=False,
-            ),
+        _msg_final = json.dumps(
+            {
+                "event": "size_breakdown_grid_final",
+                "request_id": request_id,
+                "filename": filename,
+                "grid_len": len(g0_list),
+                "sample_keys": sorted(list(sample.keys()))[:20] if isinstance(sample, dict) else None,
+                "sample_values": {k: sample.get(k) for k in ["COLOUR", "XS", "S", "M", "L", "XL", "Total"]}
+                if isinstance(sample, dict)
+                else None,
+            },
+            ensure_ascii=False,
         )
+        logger.info("size_breakdown_grid_final %s", _msg_final)
+        try:
+            logging.getLogger("uvicorn.error").info("size_breakdown_grid_final %s", _msg_final)
+        except Exception:
+            pass
     except Exception:
         pass
 
