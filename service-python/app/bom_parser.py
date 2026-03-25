@@ -635,6 +635,7 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                 line_c: Dict[str, Any] = {
                     "component": component,
                     "description": desc,
+                    "composition": composition,
                     "consumption": cons_val,
                     "uom": uom,
                     "weight": weight,
