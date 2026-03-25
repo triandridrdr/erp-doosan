@@ -630,17 +630,112 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
   });
 
   const salesOrderPayload = useMemo(() => {
+    const readSalesOrderPayload = (r: any) => r?.salesOrderPayload ?? r?.data?.salesOrderPayload ?? r?.data?.data?.salesOrderPayload;
+    const readBomPayload = (r: any) => r?.bomPayload ?? r?.bom_payload ?? r?.data?.bomPayload ?? r?.data?.bom_payload;
+
+    const isOkItem = (r: any) => {
+      if (!r) return false;
+      if (typeof r === 'object' && 'success' in r) return (r as any).success === true;
+      return true;
+    };
+
+    const pickByFilename = (needleList: string[]) => {
+      if (!extractBatchResult || !Array.isArray(extractBatchResult)) return undefined;
+      for (let i = 0; i < selectedFiles.length; i++) {
+        const f = selectedFiles[i];
+        const name = (f?.name || '').toUpperCase();
+        const hit = needleList.some((nd) => name.includes(nd));
+        const r = (extractBatchResult as any[])[i];
+        if (hit && isOkItem(r)) return r;
+      }
+      return undefined;
+    };
+
+    const hasSizeGrid = (p: any) => {
+      try {
+        const grid = p?.total_order?.grid;
+        return Array.isArray(grid) && grid.length > 0;
+      } catch {
+        return false;
+      }
+    };
+
+    const hasBomLines = (p: any) => {
+      try {
+        const lines = p?.bom_payload?.lines;
+        return Array.isArray(lines) && lines.length > 0;
+      } catch {
+        return false;
+      }
+    };
+
+    const pickByFilenameAndPayload = (needleList: string[], predicate: (p: any) => boolean) => {
+      if (!extractBatchResult || !Array.isArray(extractBatchResult)) return undefined;
+      for (let i = 0; i < selectedFiles.length; i++) {
+        const f = selectedFiles[i];
+        const name = (f?.name || '').toUpperCase();
+        const hit = needleList.some((nd) => name.includes(nd));
+        if (!hit) continue;
+        const r = (extractBatchResult as any[])[i];
+        if (!isOkItem(r)) continue;
+        const p = readSalesOrderPayload(r);
+        if (p && typeof p === 'object' && predicate(p)) return r;
+      }
+      return undefined;
+    };
+
+    const pickFirstOk = () => {
+      if (!extractBatchResult || !Array.isArray(extractBatchResult)) return undefined;
+      for (const r of extractBatchResult as any[]) {
+        if (isOkItem(r)) return r;
+      }
+      return undefined;
+    };
+
+    // Smart multi-file merge:
+    // - size breakdown from SizePerColourBreakdown PDF
+    // - bom payload from Supplementary Product Information PDF
+    if (isBatchMode && extractBatchResult && extractBatchResult.length > 0) {
+      const sizeNeedles = ['SIZEPERCOLOURBREAKDOWN', 'SIZE PER COLOUR', 'SIZE BREAKDOWN', 'SIZEBREAKDOWN'];
+      const bomNeedles = ['SUPPLEMENTARY PRODUCT INFORMATION', 'SUPPLEMENTARY PRODUCT', 'SUPPLEMENTARY'];
+
+      const sizeR =
+        pickByFilenameAndPayload(sizeNeedles, hasSizeGrid) ?? pickByFilename(sizeNeedles) ?? pickFirstOk();
+      const bomR = pickByFilenameAndPayload(bomNeedles, hasBomLines) ?? pickByFilename(bomNeedles) ?? pickFirstOk();
+
+      const pSize = readSalesOrderPayload(sizeR as any);
+      const pBom = readSalesOrderPayload(bomR as any);
+      // Spring merges `bom_payload` into `salesOrderPayload`; prefer it if present.
+      const bom0 = (pBom as any)?.bom_payload ?? readBomPayload(bomR as any);
+
+      const base = (pSize && typeof pSize === 'object') ? pSize : (pBom && typeof pBom === 'object') ? pBom : null;
+      if (!base || typeof base !== 'object') return null;
+
+      const so: any = { ...(base as any) };
+      if (pBom && typeof pBom === 'object') {
+        // Merge header fields if base is size file but bom file has extra header keys.
+        if ((pBom as any).header && typeof (pBom as any).header === 'object') {
+          so.header = { ...(so.header || {}), ...((pBom as any).header || {}) };
+        }
+      }
+      if (bom0 && typeof bom0 === 'object') {
+        so.bom_payload = bom0;
+      }
+      return so as SalesOrderPayload;
+    }
+
+    // Single-file path (or fallback):
     const r: any = effectiveExtractResult as any;
-    const p0 = r?.salesOrderPayload ?? r?.data?.salesOrderPayload ?? r?.data?.data?.salesOrderPayload;
+    const p0 = readSalesOrderPayload(r);
     if (!p0 || typeof p0 !== 'object') return null;
 
-    const bom0 = r?.bomPayload ?? r?.bom_payload ?? r?.data?.bomPayload ?? r?.data?.bom_payload;
+    const bom0 = readBomPayload(r);
     const so: any = { ...(p0 as any) };
     if (bom0 && typeof bom0 === 'object' && !so?.bom_payload) {
       so.bom_payload = bom0;
     }
     return so as SalesOrderPayload;
-  }, [effectiveExtractResult]);
+  }, [effectiveExtractResult, extractBatchResult, isBatchMode, selectedFiles]);
 
   useEffect(() => {
     if (!salesOrderPayload) {

@@ -35,7 +35,8 @@ export const ocrApi = {
         'Content-Type': 'multipart/form-data',
       },
     });
-    return response.data.data;
+    const out = response.data.data || [];
+    return out.map((r) => ({ success: true, data: r } as any));
   },
 
   /**
@@ -66,7 +67,8 @@ export const ocrApi = {
         'Content-Type': 'multipart/form-data',
       },
     });
-    return response.data.data;
+    const out = response.data.data || [];
+    return out.map((r) => ({ success: true, data: r } as any));
   },
 };
 
@@ -115,6 +117,21 @@ export const ocrPythonApi = {
     return response.data;
   },
 
+  extractBatch: async (files: File[]) => {
+    const formData = new FormData();
+    for (const f of files || []) {
+      formData.append('files', f);
+    }
+
+    const response = await client.post<ApiResponse<OcrResponse[]>>('/api/v1/ocr/python/extract/batch?view=json', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    const out = response.data.data || [];
+    return out.map((r) => ({ success: true, data: r } as any));
+  },
+
   analyze: async (file: File) => {
     const formData = new FormData();
     formData.append('file', file);
@@ -125,5 +142,20 @@ export const ocrPythonApi = {
       },
     });
     return response.data;
+  },
+
+  analyzeBatch: async (files: File[]) => {
+    const formData = new FormData();
+    for (const f of files || []) {
+      formData.append('files', f);
+    }
+
+    const response = await client.post<ApiResponse<DocumentAnalysisResponse[]>>('/api/v1/ocr/python/analyze/batch', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    const out = response.data.data || [];
+    return out.map((r) => ({ success: true, data: r } as any));
   },
 };
