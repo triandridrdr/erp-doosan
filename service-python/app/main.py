@@ -1165,7 +1165,8 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
 
         multi = n_blocks > 1
         for i in range(n_blocks):
-            for sec_name, cands in [("ASSORTMENT", ass), ("SOLID", sol), ("TOTAL", tot)]:
+            # Do not emit TOTAL rows in the sales-order size breakdown output.
+            for sec_name, cands in [("ASSORTMENT", ass), ("SOLID", sol)]:
                 if not (isinstance(cands, list) and i < len(cands) and isinstance(cands[i], dict)):
                     continue
                 sec = cands[i]
