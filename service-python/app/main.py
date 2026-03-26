@@ -1082,48 +1082,38 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
 
         rows: List[Dict[str, str]] = []
 
-        def _score_candidate(m: Dict[str, str]) -> float:
-            try:
-                t = str(m.get("Total") or "").strip()
-                if t:
-                    return float(re.sub(r"[^0-9.+-]", "", t) or "0")
-            except Exception:
-                pass
-            ssum = 0.0
-            for kk in ["XS", "S", "M", "L", "XL"]:
-                try:
-                    vv = float(re.sub(r"[^0-9.+-]", "", str(m.get(kk) or "").strip()) or "0")
-                except Exception:
-                    vv = 0.0
-                ssum += vv
-            return float(ssum)
+        ass = sec_candidates.get("ASSORTMENT") or []
+        sol = sec_candidates.get("SOLID") or []
+        tot = sec_candidates.get("TOTAL") or []
 
-        for sec_name in ["ASSORTMENT", "SOLID", "TOTAL"]:
-            cands = sec_candidates.get(sec_name) or []
-            if not isinstance(cands, list) or not cands:
-                continue
-            best = None
-            best_score = -1.0
-            for m in cands:
-                if not isinstance(m, dict):
+        try:
+            n_blocks = int(max(len(ass), len(sol), len(tot)))
+        except Exception:
+            n_blocks = 0
+        if n_blocks <= 0:
+            return None
+
+        multi = n_blocks > 1
+        for i in range(n_blocks):
+            for sec_name, cands in [("ASSORTMENT", ass), ("SOLID", sol), ("TOTAL", tot)]:
+                if not (isinstance(cands, list) and i < len(cands) and isinstance(cands[i], dict)):
                     continue
-                sc = _score_candidate(m)
-                if sc > best_score:
-                    best_score = sc
-                    best = m
-            sec = best or {}
-            row: Dict[str, str] = {
-                "COLOUR": sec_name,
-                "XS": str(sec.get("XS") or "").strip(),
-                "S": str(sec.get("S") or "").strip(),
-                "M": str(sec.get("M") or "").strip(),
-                "L": str(sec.get("L") or "").strip(),
-                "XL": str(sec.get("XL") or "").strip(),
-                "Total": str(sec.get("Total") or "").strip(),
-            }
-            # skip fully empty rows
-            if any(v for k, v in row.items() if k != "COLOUR" and str(v or "").strip()):
-                rows.append(row)
+                sec = cands[i]
+                label = sec_name
+                if multi:
+                    label = f"{sec_name} ({i + 1})"
+                row = {
+                    "COLOUR": label,
+                    "XS": str(sec.get("XS") or "").strip(),
+                    "S": str(sec.get("S") or "").strip(),
+                    "M": str(sec.get("M") or "").strip(),
+                    "L": str(sec.get("L") or "").strip(),
+                    "XL": str(sec.get("XL") or "").strip(),
+                    "Total": str(sec.get("Total") or "").strip(),
+                }
+                # skip fully empty rows
+                if any(v for k, v in row.items() if k != "COLOUR" and str(v or "").strip()):
+                    rows.append(row)
 
         if not rows:
             return None
@@ -3907,6 +3897,7 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                             return v
                     return None
 
+                tbl_source = str(t.get("_source") or "").strip().lower()
                 for r in rows:
                     if not isinstance(r, dict):
                         continue
@@ -3951,8 +3942,8 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                     if re.fullmatch(r"\d{1,6}", colour or "") and not any([xs_v, s_v, m_v, l_v, xl_v, tot_v]):
                         continue
 
-                    # Skip TOTAL summary row
-                    if re.fullmatch(r"TOTAL", (colour or "").strip(), flags=re.IGNORECASE):
+                    # Skip TOTAL summary row (but keep it for SizePerColourBreakdown pseudo-grid)
+                    if re.fullmatch(r"TOTAL", (colour or "").strip(), flags=re.IGNORECASE) and tbl_source != "pdf_text_size_per_colour_breakdown":
                         continue
                     grid_out.append(
                         {
@@ -4168,6 +4159,7 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
             # Also scan rows dicts for metadata + cost price
             rows = t.get("rows") or []
             if isinstance(rows, list):
+                tbl_source = str(t.get("_source") or "").strip().lower()
                 for r in rows:
                     if not isinstance(r, dict):
                         continue
@@ -4212,8 +4204,8 @@ def _build_sales_order_payload(tables: Any) -> Dict[str, Any]:
                         meta["cost_price"] = v0 or meta.get("cost_price")
                         continue
 
-                    # Skip TOTAL summary row in payload lines
-                    if re.fullmatch(r"TOTAL", (c0 or "").strip(), flags=re.IGNORECASE):
+                    # Skip TOTAL summary row in payload lines (but keep for SizePerColourBreakdown pseudo-grid)
+                    if re.fullmatch(r"TOTAL", (c0 or "").strip(), flags=re.IGNORECASE) and tbl_source != "pdf_text_size_per_colour_breakdown":
                         continue
                     # Only keep real grid rows
                     if c0 and re.search(r"\b(LOGISTIC\s+ORDER|DELIVERY|INCOTERM|FROM|HANDOVER\s+DATE|TRANSPORT\s+MODE|PRESENTATION\s+TYPE)\b", c0, flags=re.IGNORECASE):
