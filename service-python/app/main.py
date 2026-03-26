@@ -1014,6 +1014,10 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
             if mq:
                 cur_map["Total"] = _canon_num(mq.group(1) or "")
                 saw_qty = True
+                _commit_candidate(cur, cur_map)
+                cur_map = {}
+                # End of a section block; ignore subsequent size lines until a new marker appears.
+                cur = ""
                 continue
 
             any_size = False
@@ -1024,7 +1028,7 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
                 v = _canon_num(ms.group(2) or "")
                 if k and v:
                     cur_map[k] = v
-            if not any_size:
+            if not any_size and match_paren == 0:
                 for ms in size_line_re2.finditer(ln):
                     any_size = True
                     match_loose += 1
