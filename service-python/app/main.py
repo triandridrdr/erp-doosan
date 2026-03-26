@@ -929,6 +929,11 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
         cur = ""
         cur_map: Dict[str, str] = {}
 
+        cur_dest = ""
+        cur_colour_name_parts: List[str] = []
+        capture_colour_name = False
+        expect_dest = False
+
         # Match tokens like: 'XS (XS)* 385' or 'XL (XL)* 302'
         # Some embedded text exports may put multiple size tokens on one line.
         # Prefer explicit '(XS)' style, but OCR text may omit parentheses.
@@ -983,12 +988,77 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
                     return
                 if not isinstance(m, dict):
                     return
+                if cur_dest:
+                    m["_dest"] = cur_dest
+                if cur_colour_name_parts:
+                    m["_colour_name"] = " / ".join([x for x in cur_colour_name_parts if str(x or "").strip()])
                 if any(str(m.get(k) or "").strip() for k in ["XS", "S", "M", "L", "XL", "Total"]):
                     sec_candidates[sec_name].append(dict(m))
             except Exception:
                 return
 
+        def _maybe_capture_meta(line: str) -> None:
+            nonlocal cur_dest, cur_colour_name_parts, capture_colour_name, expect_dest
+            try:
+                s0 = str(line or "").strip()
+                if not s0:
+                    return
+
+                # Destination appears right after this header in SizePerColourBreakdown.
+                if re.search(r"\bSIZE\s*/\s*COLOU?R\s+BREAKDOWN\b", s0, flags=re.IGNORECASE) is not None:
+                    expect_dest = True
+                    return
+
+                if expect_dest:
+                    # Accept first non-empty non-size line as destination.
+                    if re.search(r"\b(ASSORTMENT|SOLID|TOTAL|QUANTITY)\b", s0, flags=re.IGNORECASE) is not None:
+                        expect_dest = False
+                    elif size_line_re.search(s0) is not None:
+                        # still inside size lines; keep waiting
+                        return
+                    else:
+                        cur_dest = s0
+                        expect_dest = False
+                        return
+
+                # Destination lines look like: 'Germany (Central Eur Market) DE (PMCEU)'
+                # Guard against size lines like 'XS (XS) * 0' (they would otherwise match the pattern).
+                m_dest = re.search(r"\b([A-Z]{2})\s*\(([A-Z0-9\-]{2,24})\)\b", s0)
+                if m_dest is not None:
+                    cc = (m_dest.group(1) or "").upper().strip()
+                    if cc not in {"XS", "XL", "SM", "MD"} and cc not in {"S", "M", "L"}:
+                        # Keep the full string as displayed in the PDF.
+                        # Also require it to look like a header line (avoid short/fragment matches).
+                        if len(s0) >= 12:
+                            cur_dest = s0
+                            return
+
+                # Colour Name: may span multiple lines.
+                if re.search(r"\bCOLOU?R\s+NAME\b\s*:", s0, flags=re.IGNORECASE) is not None:
+                    capture_colour_name = True
+                    cur_colour_name_parts = []
+                    tail = re.sub(r"^.*?\bCOLOU?R\s+NAME\b\s*:\s*", "", s0, flags=re.IGNORECASE).strip()
+                    if tail:
+                        cur_colour_name_parts.append(tail)
+                    return
+
+                if capture_colour_name:
+                    # Stop capture on next known field label or section marker
+                    if re.search(
+                        r"\b(ARTICLE\s+NO|H\&M\s+COLOU?R\s+CODE|DESCRIPTION|PT\s+ARTICLE\s+NUMBER|OPTION\s+NO|DESTINATION|ASSORTMENT|SOLID|TOTAL)\b\s*:??",
+                        s0,
+                        flags=re.IGNORECASE,
+                    ) is not None:
+                        capture_colour_name = False
+                        return
+                    if len(cur_colour_name_parts) < 3:
+                        cur_colour_name_parts.append(s0)
+                    return
+            except Exception:
+                return
+
         for ln in lines:
+            _maybe_capture_meta(ln)
             prev = cur
             cur, ln2, switched = _maybe_switch_section(ln, cur)
             if switched:
@@ -1102,6 +1172,17 @@ def _parse_size_per_colour_breakdown_from_text(txt: str) -> Optional[Dict[str, A
                 label = sec_name
                 if multi:
                     label = f"{sec_name} ({i + 1})"
+                try:
+                    d0 = str(sec.get("_dest") or "").strip()
+                    cn0 = str(sec.get("_colour_name") or "").strip()
+                    if d0 and cn0:
+                        label = f"{label} - {d0} - {cn0}"
+                    elif d0:
+                        label = f"{label} - {d0}"
+                    elif cn0:
+                        label = f"{label} - {cn0}"
+                except Exception:
+                    pass
                 row = {
                     "COLOUR": label,
                     "XS": str(sec.get("XS") or "").strip(),
