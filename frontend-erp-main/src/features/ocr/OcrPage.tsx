@@ -177,6 +177,12 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
   const buyer = asString(pickAny(header, ['buyer']));
   const supplier = asString(pickAny(header, ['supplier']));
   const article = asString(pickAny(header, ['article', 'style', 'styleno']));
+  const productName = asString(pickAny(header, ['product_name', 'productname', 'description']));
+  const productType = asString(pickAny(header, ['product_type', 'producttype']));
+  const customsCustomerGroup = asString(pickAny(header, ['customs_customer_group', 'customscustomergroup']));
+  const typeOfConstruction = asString(pickAny(header, ['type_of_construction', 'typeofconstruction']));
+  const productDevNo = asString(pickAny(header, ['product_dev_no', 'productdevno']));
+  const productDevName = asString(pickAny(header, ['product_dev_name', 'productdevname']));
   const paymentterms = asString(pickAny(header, ['paymentterms', 'payment_terms', 'terms']));
   const marketoforigin = asString(pickAny(header, ['marketoforigin', 'market_of_origin', 'countryoforigin', 'origin']));
   const totalorderInt = toIntLoose(pickAny(header, ['totalorder', 'total']));
@@ -190,7 +196,13 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
     { field: 'Season', value: season, editable: true },
     { field: 'Buyer Code', value: buyer, editable: true },
     { field: 'Supplier', value: supplier, editable: true },
-    { field: 'Article', value: article, editable: true },
+    { field: 'Article / Product No', value: article, editable: true },
+    { field: 'Product Name', value: productName, editable: true },
+    { field: 'Product Type', value: productType, editable: true },
+    { field: 'Customs Customer Group', value: customsCustomerGroup, editable: true },
+    { field: 'Type of Construction', value: typeOfConstruction, editable: true },
+    { field: 'Product Dev No', value: productDevNo, editable: true },
+    { field: 'Product Dev Name', value: productDevName, editable: true },
     { field: 'Payment Terms', value: paymentterms, editable: true },
     { field: 'Country of Origin', value: marketoforigin, editable: true },
     { field: 'Total Qty', value: String(totalorderInt), editable: true },

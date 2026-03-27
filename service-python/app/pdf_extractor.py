@@ -163,11 +163,13 @@ def try_pdf_digital_fastpath(
             "suppliercode": "supplierref",
             "suppliername": "supplier",
             "productno": "article",
-            "productname": "description",
-            "producttype": "description",
+            "productname": "product_name",
+            "producttype": "product_type",
             "season": "season",
-            "customscustomergroup": "buyer",
-            "typeofconstruction": "description",
+            "customscustomergroup": "customs_customer_group",
+            "typeofconstruction": "type_of_construction",
+            "productdevno": "product_dev_no",
+            "productdevname": "product_dev_name",
         }
 
         def push(k_raw: str, v_raw: str) -> None:
@@ -201,6 +203,23 @@ def try_pdf_digital_fastpath(
         def push_from_row(cells: List[str]) -> None:
             if len(cells) < 2:
                 return
+
+            def _is_label_cell(s: str) -> bool:
+                try:
+                    return _hm_norm_label(s) in key_map
+                except Exception:
+                    return False
+
+            def _pick_value_after(i_key: int) -> str:
+                # Prefer the next cell that is not another label.
+                for j in range(i_key + 1, len(cells)):
+                    if not str(cells[j] or "").strip():
+                        continue
+                    if _is_label_cell(cells[j]):
+                        continue
+                    return cells[j]
+                # Fallback to immediate next cell.
+                return cells[i_key + 1] if i_key + 1 < len(cells) else ""
             # Common split label: first two cells are label fragments, third is value
             if len(cells) >= 3:
                 k12 = (cells[0] + " " + cells[1]).strip()
@@ -209,14 +228,13 @@ def try_pdf_digital_fastpath(
                     return
             # Typical KV layout
             if _hm_norm_label(cells[0]) in key_map:
-                push(cells[0], cells[1])
+                push(cells[0], _pick_value_after(0))
                 return
             # Label might appear later in the row (multi-column kv)
             for i in range(0, len(cells) - 1):
                 k = cells[i]
-                v = cells[i + 1]
                 if _hm_norm_label(k) in key_map:
-                    push(k, v)
+                    push(k, _pick_value_after(i))
 
         for t in tables:
             if not isinstance(t, dict):

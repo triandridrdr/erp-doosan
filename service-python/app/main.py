@@ -7475,6 +7475,30 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             if not vv:
                 return True
             v_l = vv.lower()
+            # Common OCR contamination: multiple labels glued into a single value.
+            # If a value contains other HM header labels, treat it as bad so it can be overridden.
+            bad_label_hits = [
+                "customs customer group",
+                "type of construction",
+                "product dev no",
+                "product dev name",
+                "product development",
+                "product type",
+                "product name",
+                "supplier name",
+                "supplier code",
+                "season",
+            ]
+            if any(x in v_l for x in bad_label_hits):
+                if kk in {
+                    "season",
+                    "supplier",
+                    "customs_customer_group",
+                    "type_of_construction",
+                    "product_dev_no",
+                    "product_dev_name",
+                }:
+                    return True
             if kk == "date":
                 if "season" in v_l or "supplier" in v_l or "order" in v_l:
                     return True
@@ -7488,7 +7512,18 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             if kk == "supplier":
                 if v_l in {"send to", "sendto", "ship to", "shipto", "code"}:
                     return True
+                if re.search(r"\b(customs\s+customer\s+group|type\s+of\s+construction|product\s+dev)\b", v_l):
+                    return True
                 return False
+            if kk in {"season", "customs_customer_group", "type_of_construction", "product_dev_no", "product_dev_name"}:
+                if re.search(
+                    r"\b(customs\s+customer\s+group|type\s+of\s+construction|product\s+dev\s+no|product\s+dev\s+name|product\s+type|product\s+name|supplier\s+name|supplier\s+code|season)\b",
+                    v_l,
+                ):
+                    # if it contains labels, it's not a clean value
+                    return True
+                if kk == "product_dev_no" and v_l in {"product", "development", "productdevelopment"}:
+                    return True
             if kk == "article":
                 if _looks_like_colour_code(vv):
                     return True
@@ -7557,7 +7592,81 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             except Exception:
                 product_name = ""
             if product_name:
-                patch["description"] = product_name
+                patch["product_name"] = product_name
+
+            try:
+                m_pt = re.search(
+                    r"\bproduct\s*type\b\s*[:\-]?\s*(.+?)(?=(\n|\r|\bseason\b|\bcustoms\b|\btype\s*of\s*construction\b|\bproduct\s*dev\s*no\b|\bproduct\s*dev\s*name\b|\bbill\s*of\s*material\b))",
+                    hm_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                product_type = _hm_clean_value(m_pt.group(1) or "") if m_pt else ""
+            except Exception:
+                product_type = ""
+            if product_type:
+                patch["product_type"] = product_type
+
+            customs_grp = _grab_re(
+                r"\bcustoms\s*customer\s*group\b\s*[:\-]?\s*(.+?)(?=(\btype\s*of\s*construction\b|\bproduct\s*dev\s*no\b|\bproduct\s*dev\s*name\b|\bbill\s*of\s*material\b|\bremarks\b|\n|\r|$))"
+            )
+            if customs_grp:
+                patch["customs_customer_group"] = customs_grp
+
+            toc = _grab_re(
+                r"\btype\s*of\s*construction\b\s*[:\-]?\s*(.+?)(?=(\bcustoms\s*customer\s*group\b|\bproduct\s*dev\s*no\b|\bproduct\s*dev\s*name\b|\bbill\s*of\s*material\b|\bremarks\b|\n|\r|$))"
+            )
+            if toc:
+                patch["type_of_construction"] = toc
+
+            # Product Development: OCR often glues the whole section into one line.
+            # Prefer parsing within that section to avoid capturing label fragments.
+            try:
+                m_pd = re.search(
+                    r"\bproduct\s+development\b\s*(.+?)(?=(\boption\b|\bremarks\b|\bbill\s*of\s*material\b|\n\s*\n|$))",
+                    hm_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                pd_block = _hm_norm(m_pd.group(1) or "") if m_pd else ""
+            except Exception:
+                pd_block = ""
+
+            pd_no = _grab_re(r"\bproduct\s*dev\s*no\b\s*[:\-]?\s*([0-9A-Z\-]{3,20})")
+            if not pd_no and pd_block:
+                try:
+                    m_pdno = re.search(r"\bproduct\s*dev\s*no\b\s*[:\-]?\s*([0-9A-Z\-]{3,20})", pd_block, flags=re.IGNORECASE)
+                    pd_no = _hm_clean_value(m_pdno.group(1) or "") if m_pdno else ""
+                except Exception:
+                    pd_no = ""
+            if pd_no and str(pd_no).strip().lower() not in {"product", "development", "productdevelopment"}:
+                patch["product_dev_no"] = pd_no
+
+            try:
+                m_pdn = re.search(
+                    r"\bproduct\s*dev\s*name\b\s*[:\-]?\s*(.+?)(?=(\n|\r|\bproduct\s*dev\s*no\b|\bbill\s*of\s*material\b))",
+                    hm_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                pd_name = _hm_clean_value(m_pdn.group(1) or "") if m_pdn else ""
+            except Exception:
+                pd_name = ""
+            if (not pd_name) and pd_block:
+                try:
+                    m_pdname = re.search(
+                        r"\bproduct\s*dev\s*name\b\s*[:\-]?\s*(.+?)(?=(\bproduct\s*dev\s*no\b|\boption\b|\bremarks\b|$))",
+                        pd_block,
+                        flags=re.IGNORECASE,
+                    )
+                    pd_name = _hm_clean_value(m_pdname.group(1) or "") if m_pdname else ""
+                except Exception:
+                    pd_name = ""
+            # Sometimes dev-name gets prefixed with dev-no (e.g. '1296942D Jannika Short Dress')
+            if pd_name and pd_no:
+                try:
+                    pd_name = re.sub(rf"^\s*{re.escape(str(pd_no).strip())}\s+", "", str(pd_name), flags=re.IGNORECASE).strip()
+                except Exception:
+                    pass
+            if pd_name:
+                patch["product_dev_name"] = pd_name
 
             season = _grab_re(r"\bseason\b\s*[:\-]?\s*([0-9]\s*[-/]\s*\d{4}|[SW]\s*\d{4})")
             if season:
@@ -8546,6 +8655,30 @@ async def ocr_extract(
             if not vv:
                 return True
             v_l = vv.lower()
+            # Common OCR contamination: multiple labels glued into a single value.
+            # If a value contains other HM header labels, treat it as bad so it can be overridden.
+            bad_label_hits = [
+                "customs customer group",
+                "type of construction",
+                "product dev no",
+                "product dev name",
+                "product development",
+                "product type",
+                "product name",
+                "supplier name",
+                "supplier code",
+                "season",
+            ]
+            if any(x in v_l for x in bad_label_hits):
+                if kk in {
+                    "season",
+                    "supplier",
+                    "customs_customer_group",
+                    "type_of_construction",
+                    "product_dev_no",
+                    "product_dev_name",
+                }:
+                    return True
             if kk == "date":
                 if "season" in v_l or "supplier" in v_l or "order" in v_l:
                     return True
@@ -8559,7 +8692,17 @@ async def ocr_extract(
             if kk == "supplier":
                 if v_l in {"send to", "sendto", "ship to", "shipto", "code"}:
                     return True
+                if re.search(r"\b(customs\s+customer\s+group|type\s+of\s+construction|product\s+dev)\b", v_l):
+                    return True
                 return False
+            if kk in {"season", "customs_customer_group", "type_of_construction", "product_dev_no", "product_dev_name"}:
+                if re.search(
+                    r"\b(customs\s+customer\s+group|type\s+of\s+construction|product\s+dev\s+no|product\s+dev\s+name|product\s+type|product\s+name|supplier\s+name|supplier\s+code|season)\b",
+                    v_l,
+                ):
+                    return True
+                if kk == "product_dev_no" and v_l in {"product", "development", "productdevelopment"}:
+                    return True
             if kk == "article":
                 if _looks_like_colour_code(vv):
                     return True
@@ -8626,7 +8769,81 @@ async def ocr_extract(
             except Exception:
                 product_name = ""
             if product_name:
-                patch["description"] = product_name
+                patch["product_name"] = product_name
+
+            try:
+                m_pt = re.search(
+                    r"\bproduct\s*type\b\s*[:\-]?\s*(.+?)(?=(\n|\r|\bseason\b|\bcustoms\b|\btype\s*of\s*construction\b|\bproduct\s*dev\s*no\b|\bproduct\s*dev\s*name\b|\bbill\s*of\s*material\b))",
+                    hm_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                product_type = _hm_clean_value(m_pt.group(1) or "") if m_pt else ""
+            except Exception:
+                product_type = ""
+            if product_type:
+                patch["product_type"] = product_type
+
+            customs_grp = _grab_re(
+                r"\bcustoms\s*customer\s*group\b\s*[:\-]?\s*(.+?)(?=(\btype\s*of\s*construction\b|\bproduct\s*dev\s*no\b|\bproduct\s*dev\s*name\b|\bbill\s*of\s*material\b|\bremarks\b|\n|\r|$))"
+            )
+            if customs_grp:
+                patch["customs_customer_group"] = customs_grp
+
+            toc = _grab_re(
+                r"\btype\s*of\s*construction\b\s*[:\-]?\s*(.+?)(?=(\bcustoms\s*customer\s*group\b|\bproduct\s*dev\s*no\b|\bproduct\s*dev\s*name\b|\bbill\s*of\s*material\b|\bremarks\b|\n|\r|$))"
+            )
+            if toc:
+                patch["type_of_construction"] = toc
+
+            # Product Development: OCR often glues the whole section into one line.
+            # Prefer parsing within that section to avoid capturing label fragments.
+            try:
+                m_pd = re.search(
+                    r"\bproduct\s+development\b\s*(.+?)(?=(\boption\b|\bremarks\b|\bbill\s*of\s*material\b|\n\s*\n|$))",
+                    hm_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                pd_block = _hm_norm(m_pd.group(1) or "") if m_pd else ""
+            except Exception:
+                pd_block = ""
+
+            pd_no = _grab_re(r"\bproduct\s*dev\s*no\b\s*[:\-]?\s*([0-9A-Z\-]{3,20})")
+            if not pd_no and pd_block:
+                try:
+                    m_pdno = re.search(r"\bproduct\s*dev\s*no\b\s*[:\-]?\s*([0-9A-Z\-]{3,20})", pd_block, flags=re.IGNORECASE)
+                    pd_no = _hm_clean_value(m_pdno.group(1) or "") if m_pdno else ""
+                except Exception:
+                    pd_no = ""
+            if pd_no and str(pd_no).strip().lower() not in {"product", "development", "productdevelopment"}:
+                patch["product_dev_no"] = pd_no
+
+            try:
+                m_pdn = re.search(
+                    r"\bproduct\s*dev\s*name\b\s*[:\-]?\s*(.+?)(?=(\n|\r|\bproduct\s*dev\s*no\b|\bbill\s*of\s*material\b))",
+                    hm_text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                pd_name = _hm_clean_value(m_pdn.group(1) or "") if m_pdn else ""
+            except Exception:
+                pd_name = ""
+            if (not pd_name) and pd_block:
+                try:
+                    m_pdname = re.search(
+                        r"\bproduct\s*dev\s*name\b\s*[:\-]?\s*(.+?)(?=(\bproduct\s*dev\s*no\b|\boption\b|\bremarks\b|$))",
+                        pd_block,
+                        flags=re.IGNORECASE,
+                    )
+                    pd_name = _hm_clean_value(m_pdname.group(1) or "") if m_pdname else ""
+                except Exception:
+                    pd_name = ""
+            # Sometimes dev-name gets prefixed with dev-no (e.g. '1296942D Jannika Short Dress')
+            if pd_name and pd_no:
+                try:
+                    pd_name = re.sub(rf"^\s*{re.escape(str(pd_no).strip())}\s+", "", str(pd_name), flags=re.IGNORECASE).strip()
+                except Exception:
+                    pass
+            if pd_name:
+                patch["product_dev_name"] = pd_name
 
             season = _grab_re(r"\bseason\b\s*[:\-]?\s*([0-9]\s*[-/]\s*\d{4}|[SW]\s*\d{4})")
             if season:
