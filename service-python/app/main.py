@@ -7524,6 +7524,10 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                     return True
                 if kk == "product_dev_no" and v_l in {"product", "development", "productdevelopment"}:
                     return True
+                if kk == "product_dev_name":
+                    # OCR sometimes glues dev-no into dev-name (e.g. '1296942D Jannika Short Dress')
+                    if re.match(r"^\s*[0-9]{6,10}[A-Z]?\s+\S+", vv):
+                        return True
             if kk == "article":
                 if _looks_like_colour_code(vv):
                     return True
@@ -7637,6 +7641,8 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
                     pd_no = _hm_clean_value(m_pdno.group(1) or "") if m_pdno else ""
                 except Exception:
                     pd_no = ""
+            if pd_no and str(pd_no).strip().lower() in {"product", "development", "productdevelopment"}:
+                pd_no = ""
             if pd_no and str(pd_no).strip().lower() not in {"product", "development", "productdevelopment"}:
                 patch["product_dev_no"] = pd_no
 
@@ -7663,6 +7669,17 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             if pd_name and pd_no:
                 try:
                     pd_name = re.sub(rf"^\s*{re.escape(str(pd_no).strip())}\s+", "", str(pd_name), flags=re.IGNORECASE).strip()
+                except Exception:
+                    pass
+            # If dev-no wasn't captured but dev-name starts with a dev-no token, split it.
+            if pd_name and (not pd_no):
+                try:
+                    m_split = re.match(r"^\s*([0-9]{6,10}[A-Z]?)\s+(.+?)\s*$", str(pd_name))
+                    if m_split is not None:
+                        pd_no = _hm_clean_value(m_split.group(1) or "")
+                        pd_name = _hm_clean_value(m_split.group(2) or "")
+                        if pd_no and str(pd_no).strip().lower() not in {"product", "development", "productdevelopment"}:
+                            patch["product_dev_no"] = pd_no
                 except Exception:
                     pass
             if pd_name:
@@ -8703,6 +8720,9 @@ async def ocr_extract(
                     return True
                 if kk == "product_dev_no" and v_l in {"product", "development", "productdevelopment"}:
                     return True
+                if kk == "product_dev_name":
+                    if re.match(r"^\s*[0-9]{6,10}[A-Z]?\s+\S+", vv):
+                        return True
             if kk == "article":
                 if _looks_like_colour_code(vv):
                     return True
@@ -8814,6 +8834,8 @@ async def ocr_extract(
                     pd_no = _hm_clean_value(m_pdno.group(1) or "") if m_pdno else ""
                 except Exception:
                     pd_no = ""
+            if pd_no and str(pd_no).strip().lower() in {"product", "development", "productdevelopment"}:
+                pd_no = ""
             if pd_no and str(pd_no).strip().lower() not in {"product", "development", "productdevelopment"}:
                 patch["product_dev_no"] = pd_no
 
@@ -8840,6 +8862,17 @@ async def ocr_extract(
             if pd_name and pd_no:
                 try:
                     pd_name = re.sub(rf"^\s*{re.escape(str(pd_no).strip())}\s+", "", str(pd_name), flags=re.IGNORECASE).strip()
+                except Exception:
+                    pass
+            # If dev-no wasn't captured but dev-name starts with a dev-no token, split it.
+            if pd_name and (not pd_no):
+                try:
+                    m_split = re.match(r"^\s*([0-9]{6,10}[A-Z]?)\s+(.+?)\s*$", str(pd_name))
+                    if m_split is not None:
+                        pd_no = _hm_clean_value(m_split.group(1) or "")
+                        pd_name = _hm_clean_value(m_split.group(2) or "")
+                        if pd_no and str(pd_no).strip().lower() not in {"product", "development", "productdevelopment"}:
+                            patch["product_dev_no"] = pd_no
                 except Exception:
                     pass
             if pd_name:
