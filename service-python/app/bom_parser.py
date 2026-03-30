@@ -973,37 +973,10 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                             cons_map[kc] = line_c
                             cons_q[kc] = q
 
-            # HM Supplementary: sometimes a row only carries composition information (e.g. 'RECYCLED POLYESTER')
-            # without an explicit supplier/consumption value. Keep it as an info-only BOM line.
-            if (not is_supplier_row) and (not is_consumption_row) and component and composition:
-                try:
-                    if _is_composition_fragment_only(composition):
-                        raise ValueError("composition_fragment")
-
-                    # By default, only emit BOM lines that have Consumption per Unit.
-                    # Exception: HM Supplementary sometimes provides an info-only composition row for RECYCLED POLYESTER.
-                    comp_u = _cell_str(composition).upper().strip()
-                    if comp_u != "RECYCLED POLYESTER":
-                        raise ValueError("no_consumption_not_allowed")
-
-                    # Skip extremely short fragment components caused by OCR line breaks (e.g. 'ead').
-                    if len((component or "").strip()) <= 3 and not re.search(r"\d", component or ""):
-                        raise ValueError("component_fragment")
-                    line_i: Dict[str, Any] = {
-                        "component": component,
-                        "description": desc,
-                        "composition": composition,
-                        "weight": weight,
-                    }
-                    line_i = {k: v for k, v in line_i.items() if v not in (None, "")}
-                    ki = _norm_key(str(line_i.get("component") or "")) + "|" + _norm_key(str(line_i.get("composition") or ""))
-                    if ki.strip("|"):
-                        q = _quality_score_line(line_i, ["description"]) + (6 if line_i.get("weight") else 0)
-                        if (ki not in cons_map) or (q > int(cons_q.get(ki, -10**9))):
-                            cons_map[ki] = line_i
-                            cons_q[ki] = q
-                except Exception:
-                    pass
+            # HM Supplementary: do not emit composition-only rows. Output should only contain rows
+            # that have Consumption per Unit.
+            if False and (not is_supplier_row) and (not is_consumption_row) and component and composition:
+                pass
 
         score_out = _score_bom_table(headers, rm)
         return (list(cons_map.values()), list(prod_map.values()), int(score_out))
