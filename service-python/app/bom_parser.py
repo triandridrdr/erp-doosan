@@ -1,3 +1,4 @@
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -8,6 +9,51 @@ def _norm_key(s: str) -> str:
 
 def _cell_str(x: Any) -> str:
     return " ".join(str(x or "").replace("\r", " ").replace("\n", " ").split()).strip()
+
+
+def _fix_split_fiber_words(s: str) -> str:
+    """Fix common OCR splits inside fiber words in HM supplementary BoM.
+
+    Examples seen:
+    - 'RECYCLED P OLYESTER' -> 'RECYCLED POLYESTER'
+    - 'POL YESTER' -> 'POLYESTER'
+
+    Keep it conservative and only join known targets.
+    """
+    t = _cell_str(s)
+    if not t:
+        return ""
+    tu = t.upper()
+
+    # Join single-letter prefix splits (e.g. 'P OLYESTER').
+    tu = re.sub(r"\bP\s+OLYESTER\b", "POLYESTER", tu)
+    tu = re.sub(r"\bP\s+OLYAMIDE\b", "POLYAMIDE", tu)
+
+    # Handle missing leading letter cases: 'OLYESTER' -> 'POLYESTER' when preceded by a short fragment.
+    # (Actual join is handled outside; here we only normalize if OCR already merged it.)
+    tu = re.sub(r"\bOLYESTER\b", "OLYESTER", tu)
+
+    # Join common mid-word splits.
+    tu = re.sub(r"\bPOL\s+YESTER\b", "POLYESTER", tu)
+    tu = re.sub(r"\bPOLY\s+ESTER\b", "POLYESTER", tu)
+    tu = re.sub(r"\bPOLY\s+AMIDE\b", "POLYAMIDE", tu)
+    tu = re.sub(r"\bVIS\s+COSE\b", "VISCOSE", tu)
+
+    # Re-normalize whitespace after substitutions.
+    return " ".join(tu.split()).strip()
+
+
+def _is_composition_fragment_only(s: str) -> bool:
+    """Return True for standalone continuation fragments that shouldn't be emitted as composition."""
+    tu = _cell_str(s).upper()
+    if not tu:
+        return True
+    if re.fullmatch(r"(YESTER|OLYESTER|ESTER|COSE|AMIDE|OLYAMIDE)", tu) is not None:
+        return True
+    # Too short to be meaningful composition.
+    if len(tu) <= 4 and "%" not in tu:
+        return True
+    return False
 
 
 def _to_number(s: str) -> Optional[float]:
@@ -330,6 +376,8 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
     def _extract_lines_from_table(
         tbl: Dict[str, Any],
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+        dbg_comp = os.getenv("BOM_DEBUG_COMPOSITION", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
         headers = [str(h or "") for h in (tbl.get("headers") or [])]
         rm = tbl.get("rows_matrix") or []
         if not isinstance(rm, list):
@@ -459,7 +507,11 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
         cons_q: Dict[str, int] = {}
         prod_map: Dict[str, Dict[str, Any]] = {}
         prod_q: Dict[str, int] = {}
-        for r in rm[start_idx:]:
+        skip_row_idx: set[int] = set()
+
+        for ridx, r in enumerate(rm[start_idx:], start=start_idx):
+            if ridx in skip_row_idx:
+                continue
             if not isinstance(r, list):
                 continue
             cells = [_cell_str(c) for c in r]
@@ -467,6 +519,13 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                 continue
             if _is_section_or_total_row(cells):
                 continue
+
+            dbg_blob = ""
+            try:
+                if dbg_comp:
+                    dbg_blob = " ".join([c for c in cells if c]).upper()
+            except Exception:
+                dbg_blob = ""
 
             def get(col: str) -> str:
                 idx = cols.get(col)
@@ -481,7 +540,7 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             typ = get("type")
             material = get("material")
             desc = get("description")
-            composition = get("composition")
+            composition = _fix_split_fiber_words(get("composition"))
             consumption_raw = get("consumption")
             weight_raw = get("weight")
             supplier = get("supplier")
@@ -490,6 +549,165 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             uom = _norm_uom(get("uom"))
             color = get("color")
             size = get("size")
+
+            # HM Supplementary: composition can be split across consecutive rows.
+            # Example observed:
+            #   Row N:  'RECYCLED P'
+            #   Row N+1:'OLYESTER'
+            # In these cases, the inferred composition column can be empty; recover by
+            # looking at row cells and the immediate next row.
+            try:
+                if not composition and ridx + 1 < len(rm):
+                    blob_u = " ".join([c for c in cells if c]).upper()
+                    if re.search(r"\bRECYCLED\b", blob_u) and re.search(r"\bP\b", blob_u):
+                        # Find a fragment cell like 'RECYCLED P' or ending with ' P'.
+                        frag = ""
+                        for cc in cells:
+                            cu = _cell_str(cc).upper()
+                            if not cu:
+                                continue
+                            if re.search(r"\bRECYCLED\s+P\b", cu) is not None:
+                                frag = cc
+                                break
+                            if re.search(r"\bRECYCLED\b", cu) is not None and cu.split() and cu.split()[-1] == "P":
+                                frag = cc
+                                break
+
+                        if frag:
+                            r_next = rm[ridx + 1]
+                            if isinstance(r_next, list):
+                                next_cells = [_cell_str(x) for x in r_next]
+                                tok = ""
+                                for nc in next_cells:
+                                    nu = _cell_str(nc).upper()
+                                    if nu in {"OLYESTER", "YESTER", "ESTER", "OLYAMIDE", "AMIDE", "COSE"}:
+                                        tok = nc
+                                        break
+                                if tok:
+                                    composition = _fix_split_fiber_words(f"{frag} {tok}")
+                                    # Skip the next row if it looks like a continuation fragment row.
+                                    # PPStructure sometimes keeps extra fragments in description, so be lenient:
+                                    # if key columns are empty and the row mainly contains the continuation token,
+                                    # we drop it.
+                                    try:
+                                        # Identify whether the next row has any meaningful fields.
+                                        def _get_next(col: str) -> str:
+                                            idx = cols.get(col)
+                                            if idx is None:
+                                                return ""
+                                            if idx < 0 or idx >= len(next_cells):
+                                                return ""
+                                            return next_cells[idx]
+
+                                        has_key = any(
+                                            _get_next(k)
+                                            for k in [
+                                                "position",
+                                                "placement",
+                                                "type",
+                                                "material",
+                                                "supplier",
+                                                "consumption",
+                                                "weight",
+                                                "qty",
+                                            ]
+                                        )
+
+                                        nxt_blob = " ".join([c for c in next_cells if c]).upper().strip()
+                                        has_cont = re.search(r"\b(OLYESTER|YESTER|ESTER|OLYAMIDE|AMIDE|COSE)\b", nxt_blob) is not None
+                                        has_other_fiber = re.search(
+                                            r"\b(POLYESTER|POLYAMIDE|COTTON|VISCOSE|NYLON|ELASTANE|WOOL|LINEN|ACRYLIC|RAYON|SILK)\b",
+                                            nxt_blob,
+                                        ) is not None
+
+                                        # Skip when it doesn't carry key columns and is essentially a continuation.
+                                        if (not has_key) and has_cont and (not has_other_fiber or re.fullmatch(r"(OLYESTER|YESTER|ESTER|OLYAMIDE|AMIDE|COSE)(?:\s+\d.*)?", nxt_blob) is not None):
+                                            skip_row_idx.add(ridx + 1)
+                                    except Exception:
+                                        nxt_blob = " ".join([c for c in next_cells if c]).upper()
+                                        if re.fullmatch(r"(OLYESTER|YESTER|ESTER|OLYAMIDE|AMIDE|COSE)", nxt_blob.strip() or "") is not None:
+                                            skip_row_idx.add(ridx + 1)
+            except Exception:
+                pass
+
+            # HM Supplementary: composition text can be split across adjacent cells, e.g.
+            # 'RECYCLED P' | 'OLYESTER' or 'POL' | 'YESTER'. Try to join with the
+            # immediate next cell when it looks like a fiber continuation.
+            try:
+                ci = cols.get("composition")
+                if ci is not None and ci >= 0 and ci < len(cells):
+                    nxt = cells[ci + 1] if (ci + 1) < len(cells) else ""
+                    if composition and nxt:
+                        cu = composition.upper()
+                        nu = _cell_str(nxt).upper()
+                        # Continuation tokens that often appear in the next cell.
+                        if re.fullmatch(r"(OLYESTER|YESTER|ESTER|OLYAMIDE|AMIDE|COSE)", nu or "") is not None:
+                            # If the last token of composition is a short fragment, join.
+                            last_tok = (cu.split()[-1] if cu.split() else "")
+                            if 1 <= len(last_tok) <= 5:
+                                composition = _fix_split_fiber_words(f"{composition} {nxt}")
+            except Exception:
+                pass
+
+            def _maybe_join_composition_continuation(comp: str) -> str:
+                """Join composition fragments with continuation tokens found elsewhere in the row or headers.
+
+                Examples:
+                - 'RECYCLED P' + 'OLYESTER' (in another cell or merged header) -> 'RECYCLED POLYESTER'
+                """
+                try:
+                    base = _fix_split_fiber_words(comp)
+                    if not base:
+                        return ""
+                    bu = base.upper()
+                    toks = bu.split()
+                    last_tok = toks[-1] if toks else ""
+                    if not (1 <= len(last_tok) <= 5):
+                        return base
+
+                    # Look for a continuation token in cells.
+                    cont = ""
+                    for cc in cells:
+                        cu = _cell_str(cc).upper()
+                        if cu in {"OLYESTER", "YESTER", "ESTER", "OLYAMIDE", "AMIDE", "COSE"}:
+                            cont = cu
+                            break
+
+                    # Look for a continuation token in merged headers too (PPStructure sometimes leaks text there).
+                    if not cont:
+                        hblob = " ".join([str(h or "") for h in headers]).upper()
+                        for tok in ["OLYESTER", "YESTER", "ESTER", "OLYAMIDE", "AMIDE", "COSE"]:
+                            if re.search(r"\b" + re.escape(tok) + r"\b", hblob):
+                                cont = tok
+                                break
+
+                    if not cont:
+                        return base
+                    return _fix_split_fiber_words(f"{base} {cont}")
+                except Exception:
+                    return _fix_split_fiber_words(comp)
+
+            if dbg_comp:
+                try:
+                    if re.search(r"\b(RECYCLED|POLYESTER|OLYESTER|POLYAMIDE|COTTON|VISCOSE|NYLON|ELASTANE|WOOL|LINEN|ACRYLIC|RAYON|SILK)\b", dbg_blob or "") is not None:
+                        print(
+                            "debug_bom_composition_row",
+                            {
+                                "page": tbl.get("page"),
+                                "headers": headers,
+                                "cols": cols,
+                                "cells": cells,
+                                "picked": {
+                                    "material": material,
+                                    "description": desc,
+                                    "composition": composition,
+                                    "consumption_raw": consumption_raw,
+                                    "weight_raw": weight_raw,
+                                },
+                            },
+                        )
+                except Exception:
+                    pass
 
             # Fallback: if consumption column is missing/misaligned, scan row cells for a
             # consumption-like value (e.g. '0.56 km').
@@ -554,6 +772,25 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             if not component:
                 component = material or desc
 
+            def _looks_like_composition_text(s: str) -> bool:
+                try:
+                    tu = _fix_split_fiber_words(s).upper()
+                    if not tu:
+                        return False
+                    if _is_composition_fragment_only(tu):
+                        return False
+                    if _extract_weight_value(tu):
+                        return False
+                    if _looks_like_consumption_value(tu):
+                        return False
+                    if "%" in tu:
+                        return True
+                    if re.search(r"\b(RECYCLED|POLYESTER|COTTON|VISCOSE|NYLON|ELASTANE|WOOL|LINEN|ACRYLIC|RAYON|SILK)\b", tu) is not None:
+                        return True
+                    return False
+                except Exception:
+                    return False
+
             consumption_qty = None
             consumption_uom = ""
             if consumption_raw:
@@ -593,6 +830,43 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                 weight = _extract_weight_value(composition)
             if (not weight) and consumption_raw:
                 weight = _extract_weight_value(consumption_raw)
+
+            # If composition column is misaligned and contains a weight value, clear it.
+            try:
+                if composition and _extract_weight_value(composition):
+                    if not weight:
+                        weight = _extract_weight_value(composition)
+                    composition = ""
+            except Exception:
+                pass
+
+            # If composition is missing/cleared, search row cells for a composition-like text.
+            if not composition:
+                try:
+                    best_comp = ""
+                    for cc in cells:
+                        if not cc:
+                            continue
+                        if not _looks_like_composition_text(cc):
+                            continue
+                        # Prefer percentage-based compositions.
+                        cc_fixed = _fix_split_fiber_words(cc)
+                        if _is_composition_fragment_only(cc_fixed):
+                            continue
+                        if "%" in _cell_str(cc_fixed).upper():
+                            best_comp = cc_fixed
+                            break
+                        if not best_comp:
+                            best_comp = cc_fixed
+                    if best_comp:
+                        composition = best_comp
+                except Exception:
+                    pass
+
+            # Final normalization for HM Supplementary: sometimes the fiber word is split across
+            # cells or leaked into merged headers (e.g. 'RECYCLED P' + 'OLYESTER').
+            if composition:
+                composition = _maybe_join_composition_continuation(composition)
 
             qty_num = _to_number(qty_raw)
 
@@ -656,6 +930,38 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                         if (kc not in cons_map) or (q > int(cons_q.get(kc, -10**9))):
                             cons_map[kc] = line_c
                             cons_q[kc] = q
+
+            # HM Supplementary: sometimes a row only carries composition information (e.g. 'RECYCLED POLYESTER')
+            # without an explicit supplier/consumption value. Keep it as an info-only BOM line.
+            if (not is_supplier_row) and (not is_consumption_row) and component and composition:
+                try:
+                    if _is_composition_fragment_only(composition):
+                        raise ValueError("composition_fragment")
+
+                    # By default, only emit BOM lines that have Consumption per Unit.
+                    # Exception: HM Supplementary sometimes provides an info-only composition row for RECYCLED POLYESTER.
+                    comp_u = _cell_str(composition).upper().strip()
+                    if comp_u != "RECYCLED POLYESTER":
+                        raise ValueError("no_consumption_not_allowed")
+
+                    # Skip extremely short fragment components caused by OCR line breaks (e.g. 'ead').
+                    if len((component or "").strip()) <= 3 and not re.search(r"\d", component or ""):
+                        raise ValueError("component_fragment")
+                    line_i: Dict[str, Any] = {
+                        "component": component,
+                        "description": desc,
+                        "composition": composition,
+                        "weight": weight,
+                    }
+                    line_i = {k: v for k, v in line_i.items() if v not in (None, "")}
+                    ki = _norm_key(str(line_i.get("component") or "")) + "|" + _norm_key(str(line_i.get("composition") or ""))
+                    if ki.strip("|"):
+                        q = _quality_score_line(line_i, ["description"]) + (6 if line_i.get("weight") else 0)
+                        if (ki not in cons_map) or (q > int(cons_q.get(ki, -10**9))):
+                            cons_map[ki] = line_i
+                            cons_q[ki] = q
+                except Exception:
+                    pass
 
         score_out = _score_bom_table(headers, rm)
         return (list(cons_map.values()), list(prod_map.values()), int(score_out))
