@@ -646,6 +646,22 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                             last_tok = (cu.split()[-1] if cu.split() else "")
                             if 1 <= len(last_tok) <= 5:
                                 composition = _fix_split_fiber_words(f"{composition} {nxt}")
+
+                    # Some HM tables have shifted columns; the continuation token (e.g. 'YESTER')
+                    # may not be in the immediate next cell. If composition ends with a short
+                    # fragment like 'POL', try to find a continuation token anywhere in the row.
+                    if composition:
+                        cu2 = composition.upper().strip()
+                        last_tok2 = (cu2.split()[-1] if cu2.split() else "")
+                        if last_tok2 in {"POL", "POLY", "P"}:
+                            cont = ""
+                            for cc in cells:
+                                ccu = _cell_str(cc).upper().strip()
+                                if ccu in {"OLYESTER", "YESTER", "ESTER", "OLYAMIDE", "AMIDE", "COSE"}:
+                                    cont = cc
+                                    break
+                            if cont:
+                                composition = _fix_split_fiber_words(f"{composition} {cont}")
             except Exception:
                 pass
 
@@ -868,6 +884,21 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             if composition:
                 composition = _maybe_join_composition_continuation(composition)
 
+                # Normalize common HM OCR artifacts for polyester when the word is split across lines/cells.
+                # Examples:
+                # - '100% S0 POL' + 'YESTER' -> '100% S0 POLYESTER'
+                # - 'YESTER 100% S0 POL' -> '100% S0 POLYESTER'
+                cu_norm = _cell_str(composition).upper()
+                if "POLYESTER" not in cu_norm:
+                    if re.search(r"\bS0\s+POL\b", cu_norm) is not None and re.search(r"\bYESTER\b", cu_norm) is not None:
+                        cu_norm = re.sub(r"\bYESTER\b", "", cu_norm)
+                        cu_norm = re.sub(r"\bS0\s+POL\b", "S0 POLYESTER", cu_norm)
+                        composition = " ".join(cu_norm.split()).strip()
+                    elif re.search(r"\bS0\s+POL\b", cu_norm) is not None:
+                        # If YESTER was lost, still treat it as POLYESTER (matches the source table pattern).
+                        cu_norm = re.sub(r"\bS0\s+POL\b", "S0 POLYESTER", cu_norm)
+                        composition = " ".join(cu_norm.split()).strip()
+
             qty_num = _to_number(qty_raw)
 
             # Row-level classification
@@ -927,6 +958,17 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                     )
                     if kc.strip("|"):
                         q = _quality_score_line(line_c, ["description"]) + (8 if line_c.get("weight") else 0)
+                        try:
+                            compu = _cell_str(line_c.get("composition") or "").upper()
+                            if re.search(r"\b(POLYESTER|POLYAMIDE|COTTON|VISCOSE|NYLON|ELASTANE|WOOL|LINEN|ACRYLIC|RAYON|SILK)\b", compu) is not None:
+                                q += 6
+                            # Penalize truncated fibers like trailing ' POL'
+                            if re.search(r"\bPOL\b$", compu) is not None:
+                                q -= 6
+                            if compu.startswith("YESTER "):
+                                q -= 6
+                        except Exception:
+                            pass
                         if (kc not in cons_map) or (q > int(cons_q.get(kc, -10**9))):
                             cons_map[kc] = line_c
                             cons_q[kc] = q
