@@ -1163,20 +1163,23 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             try:
                 if is_hm and is_consumption_row:
                     d0 = _cell_str(desc)
+                    # If description is actually composition (common OCR column shift),
+                    # keep only the prefix before the first percent token.
+                    try:
+                        d0u = _cell_str(d0).upper()
+                        if d0 and ("%" in d0u) and _looks_like_composition_text(d0):
+                            m_pct = re.search(r"\b\d{1,3}\s*%", d0u)
+                            if m_pct is not None and m_pct.start() > 0:
+                                d0 = _cell_str(d0[: m_pct.start()])
+                            else:
+                                d0 = ""
+                    except Exception:
+                        pass
                     if d0:
                         m_zcx = re.search(r"\bZCX\d+\b", d0.upper())
                         if m_zcx is not None:
                             d0 = d0[m_zcx.start() :].strip()
                     add_desc: List[str] = []
-
-                    # Include composition text (percent-based) in description for main fabric.
-                    try:
-                        if composition and _looks_like_composition_text(composition):
-                            comp_fixed = _fix_split_fiber_words(composition)
-                            if comp_fixed and comp_fixed not in d0 and comp_fixed not in add_desc:
-                                add_desc.append(comp_fixed)
-                    except Exception:
-                        pass
 
                     for cc in cells:
                         ccs = _cell_str(cc)
@@ -1236,7 +1239,7 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                             di = cols.get("description")
                             if di is not None and 0 <= di < len(row_cells):
                                 d_frag = _cell_str(row_cells[di])
-                            if d_frag and d_frag not in add_desc and d_frag not in d0:
+                            if d_frag and (not _looks_like_composition_text(d_frag)) and d_frag not in add_desc and d_frag not in d0:
                                 add_desc.append(d_frag)
 
                             # Continuation rows sometimes carry RECYCLED POLYESTER in a non-composition column.
