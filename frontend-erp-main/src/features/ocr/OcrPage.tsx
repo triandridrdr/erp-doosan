@@ -35,6 +35,7 @@ type ErpSizeRow = {
 type ErpBomRow = {
   id: string;
   component: string;
+  description: string;
   category: string;
   composition: string;
   uom: string;
@@ -235,6 +236,7 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
     for (const ln of bomLines) {
       if (!ln || typeof ln !== 'object') continue;
       const component = asString((ln as any).component) || asString((ln as any).material) || asString((ln as any).description);
+      const description = asString((ln as any).description);
       const { category, uom } = inferBomCategoryAndUom(component);
       const composition = asString((ln as any).composition);
       const uomRaw = asString((ln as any).uom) || uom;
@@ -248,6 +250,7 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
       bomRowsRaw.push({
         id: newRowId(),
         component: component || 'TRIMMINGS',
+        description: (description || '').trim(),
         category,
         composition: (composition || '').trim(),
         uom: (uomRaw || '').trim(),
@@ -286,6 +289,7 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
             bomRowsRaw.push({
               id: newRowId(),
               component: compKey,
+              description: '',
               category,
               composition: (it || '').replace(/,/g, '').trim(),
               uom,
@@ -298,6 +302,7 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
           bomRowsRaw.push({
             id: newRowId(),
             component: compKey,
+            description: '',
             category,
             composition: chunk.replace(/,/g, '').trim(),
             uom,
@@ -315,6 +320,7 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
           bomRowsRaw.push({
             id: newRowId(),
             component: 'MAIN FABRIC',
+            description: '',
             category,
             composition: (it || '').replace(/,/g, '').trim(),
             uom,
@@ -327,6 +333,7 @@ const buildErpDraft = (payload: SalesOrderPayload): ErpDraft => {
         bomRowsRaw.push({
           id: newRowId(),
           component: 'MAIN FABRIC',
+          description: '',
           category,
           composition: compText.replace(/,/g, '').trim(),
           uom,
@@ -1586,6 +1593,7 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                           {
                                             id: newRowId(),
                                             component: '',
+                                            description: '',
                                             category: '',
                                             composition: '',
                                             uom: '',
@@ -1607,6 +1615,7 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                   <thead className='bg-gray-50'>
                                     <tr>
                                       <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Component</th>
+                                      <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Description</th>
                                       <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Category</th>
                                       <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Composition</th>
                                       <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>UOM</th>
@@ -1619,7 +1628,7 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                   <tbody className='bg-white divide-y divide-gray-100'>
                                     {erpDraft.bomRows.length === 0 && (
                                       <tr>
-                                        <td className='px-3 py-3 text-sm text-gray-500 italic' colSpan={8}>
+                                        <td className='px-3 py-3 text-sm text-gray-500 italic' colSpan={9}>
                                           No compositionsinformation detected.
                                         </td>
                                       </tr>
@@ -1635,6 +1644,21 @@ export function OcrPage({ api = ocrPythonApi }: OcrPageProps) {
                                                 if (!cur) return cur;
                                                 const next = [...cur.bomRows];
                                                 next[idx] = { ...next[idx], component: e.target.value };
+                                                return { ...cur, bomRows: next };
+                                              });
+                                            }}
+                                          />
+                                        </td>
+                                        <td className='px-3 py-2 text-sm text-gray-900'>
+                                          <textarea
+                                            className='w-72 border border-gray-200 rounded px-2 py-1 text-sm'
+                                            rows={2}
+                                            value={r.description}
+                                            onChange={(e) => {
+                                              setErpDraft((cur) => {
+                                                if (!cur) return cur;
+                                                const next = [...cur.bomRows];
+                                                next[idx] = { ...next[idx], description: e.target.value };
                                                 return { ...cur, bomRows: next };
                                               });
                                             }}

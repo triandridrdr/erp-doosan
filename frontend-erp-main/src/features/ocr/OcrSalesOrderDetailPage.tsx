@@ -33,6 +33,7 @@ type SizeRow = {
 type BomRow = {
   id: string;
   component: string;
+  description: string;
   category: string;
   composition: string;
   uom: string;
@@ -118,6 +119,7 @@ export function OcrSalesOrderDetailPage() {
     const normBomRows = bomRows.map((r) => ({
       id: r.id || newRowId(),
       component: r.component || '',
+      description: (r as any).description || '',
       category: r.category || '',
       composition: r.composition || '',
       uom: r.uom || '',
@@ -467,6 +469,7 @@ export function OcrSalesOrderDetailPage() {
                       {
                         id: newRowId(),
                         component: '',
+                        description: '',
                         category: '',
                         composition: '',
                         uom: '',
@@ -488,6 +491,7 @@ export function OcrSalesOrderDetailPage() {
             <thead className='bg-gray-50'>
               <tr>
                 <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Component</th>
+                <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Description</th>
                 <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Category</th>
                 <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>Composition</th>
                 <th className='px-3 py-2 text-left text-xs font-semibold text-gray-600'>UOM</th>
@@ -499,7 +503,7 @@ export function OcrSalesOrderDetailPage() {
             <tbody className='bg-white divide-y divide-gray-100'>
               {draft.bomRows.length === 0 && (
                 <tr>
-                  <td className='px-3 py-3 text-sm text-gray-500 italic' colSpan={7}>
+                  <td className='px-3 py-3 text-sm text-gray-500 italic' colSpan={8}>
                     No BoM rows.
                   </td>
                 </tr>
@@ -515,6 +519,21 @@ export function OcrSalesOrderDetailPage() {
                           if (!cur) return cur;
                           const next = [...cur.bomRows];
                           next[idx] = { ...next[idx], component: e.target.value };
+                          return { ...cur, bomRows: next };
+                        });
+                      }}
+                    />
+                  </td>
+                  <td className='px-3 py-2 text-sm text-gray-900'>
+                    <textarea
+                      className='w-72 border border-gray-200 rounded px-2 py-1 text-sm'
+                      rows={2}
+                      value={r.description}
+                      onChange={(e) => {
+                        setDraft((cur) => {
+                          if (!cur) return cur;
+                          const next = [...cur.bomRows];
+                          next[idx] = { ...next[idx], description: e.target.value };
                           return { ...cur, bomRows: next };
                         });
                       }}

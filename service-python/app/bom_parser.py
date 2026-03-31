@@ -792,9 +792,7 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             # while Material Appearance/Description cells are empty. Keep these rows
             # if they carry useful values like consumption/composition.
             if not (material or desc):
-                if (typ or placement or position) and (composition or consumption_raw or qty_raw):
-                    desc = typ or placement or position
-                else:
+                if not ((typ or placement or position) and (composition or consumption_raw or qty_raw)):
                     continue
 
             component = " ".join([x for x in [position, placement, typ] if x]).strip()
@@ -807,6 +805,10 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                     if not tu:
                         return False
                     if _is_composition_fragment_only(tu):
+                        return False
+                    # Guard: construction-like tokens shouldn't be treated as composition.
+                    # Examples: '150x94', '20dx45s'
+                    if re.search(r"\b\d{2,4}X\d{2,4}\b", tu) is not None or re.search(r"\b\d+DX\d+S\b", tu) is not None:
                         return False
                     if _extract_weight_value(tu):
                         return False
@@ -946,25 +948,204 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             except Exception:
                 pass
 
-            # Final normalization for HM Supplementary: sometimes the fiber word is split across
-            # cells or leaked into merged headers (e.g. 'RECYCLED P' + 'OLYESTER').
-            if composition:
-                composition = _maybe_join_composition_continuation(composition)
+            # Final normalization for HM Supplementary: composition can be scattered across
+            # cells and/or split over multiple OCR lines. We (1) reconstruct percent clauses
+            # from the whole row, then (2) clean/dedup, then (3) join continuation fragments.
+            dbg_comp_pick: Dict[str, Any] = {}
+            if is_hm:
+                try:
+                    def _clean_hm_composition(comp: str) -> str:
+                        try:
+                            c0 = _fix_split_fiber_words(comp)
+                            if not c0:
+                                return ""
+                            m_pct = re.search(r"\b\d{1,3}\s*%", c0)
+                            if m_pct is not None:
+                                c0 = c0[m_pct.start() :]
+                            c0 = re.sub(r"\s*\+?\d+\s*/\s*\d+\b", "", c0)
+                            c0 = re.sub(r"\b\d{2,4}X\d{2,4}\b", "", c0, flags=re.IGNORECASE)
+                            c0 = re.sub(r"\b\d+DX\d+S\b", "", c0, flags=re.IGNORECASE)
+                            c0 = re.sub(r"\s*,\s*", ", ", c0)
+                            c0 = _cell_str(c0)
+                            try:
+                                c0u = c0.upper()
+                                m_lead = re.match(r"\s*(\d{1,3}\s*%\s*)", c0u)
+                                if m_lead is not None:
+                                    lead = m_lead.group(1).strip()
+                                    if lead and c0u.count(lead) >= 2:
+                                        last = c0u.rfind(lead)
+                                        if last > 0:
+                                            first_seg = c0[: last].strip()
+                                            tail = c0[last:].strip()
+                                            c0 = first_seg if len(first_seg) >= len(tail) else tail
+                                c0 = re.sub(r"\b(\d{1,3}\s*%\b[^%]{0,80})\s+\1\b", r"\1", c0, flags=re.IGNORECASE)
+                                c0 = _cell_str(c0)
+                            except Exception:
+                                c0 = _cell_str(c0)
+                            return c0
+                        except Exception:
+                            return _cell_str(_fix_split_fiber_words(comp))
 
-                # Normalize common HM OCR artifacts for polyester when the word is split across lines/cells.
-                # Examples:
-                # - '100% S0 POL' + 'YESTER' -> '100% S0 POLYESTER'
-                # - 'YESTER 100% S0 POL' -> '100% S0 POLYESTER'
-                cu_norm = _cell_str(composition).upper()
-                if "POLYESTER" not in cu_norm:
-                    if re.search(r"\bS0\s+POL\b", cu_norm) is not None and re.search(r"\bYESTER\b", cu_norm) is not None:
-                        cu_norm = re.sub(r"\bYESTER\b", "", cu_norm)
-                        cu_norm = re.sub(r"\bS0\s+POL\b", "S0 POLYESTER", cu_norm)
-                        composition = " ".join(cu_norm.split()).strip()
-                    elif re.search(r"\bS0\s+POL\b", cu_norm) is not None:
-                        # If YESTER was lost, still treat it as POLYESTER (matches the source table pattern).
-                        cu_norm = re.sub(r"\bS0\s+POL\b", "S0 POLYESTER", cu_norm)
-                        composition = " ".join(cu_norm.split()).strip()
+                    blob = " ".join([_cell_str(x) for x in cells if _cell_str(x)])
+                    blob = _fix_split_fiber_words(blob)
+
+                    def _clean_clause(cl: str) -> str:
+                        c = _cell_str(cl)
+                        if not c:
+                            return ""
+                        c = re.sub(r"\b\d+\*\d+\b", "", c)
+                        c = re.sub(r"\b\d{2,4}X\d{2,4}\b", "", c, flags=re.IGNORECASE)
+                        c = re.sub(r"\b\d+DX\d+S\b", "", c, flags=re.IGNORECASE)
+                        c = re.sub(r"\s*\+?\d+\s*/\s*\d+\b", "", c)
+                        c = re.sub(r"\bX\b", " ", c, flags=re.IGNORECASE)
+                        c = re.sub(r"%\s+(?=[A-Z])", " ", c)
+                        c = re.sub(r"\s*,\s*", ", ", c)
+                        c = _cell_str(c)
+                        cu = c.upper()
+                        if "IRCULOSE" in cu and "CIRCULOSE" not in cu:
+                            c = re.sub(r"IRCULOSE", "CIRCULOSE", c, flags=re.IGNORECASE)
+                        return _cell_str(c)
+
+                    pct_positions = [m.start() for m in re.finditer(r"\b\d{1,3}\s*%", blob)]
+                    clauses: List[str] = []
+                    if pct_positions:
+                        pct_positions2 = pct_positions + [len(blob)]
+                        for a, b in zip(pct_positions2, pct_positions2[1:]):
+                            part = _clean_clause(blob[a:b])
+                            if not part:
+                                continue
+                            if len(part) < 5:
+                                continue
+                            if re.search(r"^\d{1,3}\s*%", part) is None:
+                                continue
+                            if part not in clauses:
+                                clauses.append(part)
+
+                    dbg_comp_pick["pct_clause_count"] = len(clauses)
+                    dbg_comp_pick["pct_clauses"] = clauses[:10]
+
+                    recon = ""
+                    if clauses:
+                        by_pct: Dict[str, str] = {}
+
+                        def _score_clause(s: str) -> int:
+                            try:
+                                su = _cell_str(s).upper()
+                                sc = len(su)
+                                if re.search(r"\bPOLYAMIDE\b", su) is not None:
+                                    sc += 40
+                                if re.search(r"\b(VISCOSE|CIRCULOSE|REVISCO)\b", su) is not None:
+                                    sc += 18
+                                if re.search(r"\b(POLYESTER|COTTON|NYLON|ELASTANE|WOOL|LINEN|ACRYLIC|RAYON|SILK)\b", su) is not None:
+                                    sc += 8
+                                if re.search(r"\b\d+\*\d+\b", su) is not None:
+                                    sc -= 40
+                                if re.search(r"\b\d{2,4}X\d{2,4}\b", su) is not None or re.search(r"\b\d+DX\d+S\b", su) is not None:
+                                    sc -= 30
+                                if "%NYLON" in su:
+                                    sc -= 20
+                                return int(sc)
+                            except Exception:
+                                return len(_cell_str(s))
+
+                        order: List[str] = []
+                        for cl in clauses:
+                            m0 = re.match(r"\s*(\d{1,3})\s*%\b", cl)
+                            if not m0:
+                                continue
+                            pct = m0.group(1)
+                            if pct not in order:
+                                order.append(pct)
+                            prev = by_pct.get(pct, "")
+                            if (not prev) or (_score_clause(cl) > _score_clause(prev)):
+                                by_pct[pct] = cl
+
+                        recon = _cell_str(", ".join([by_pct[p] for p in order if by_pct.get(p)]))
+
+                    dbg_comp_pick["recon"] = recon
+
+                    comp_candidates: List[str] = []
+                    if recon:
+                        comp_candidates.append(recon)
+                    if composition:
+                        comp_candidates.append(_cell_str(composition))
+                    for cc in cells:
+                        ccs = _cell_str(cc)
+                        if not ccs:
+                            continue
+                        if _looks_like_composition_text(ccs):
+                            comp_candidates.append(ccs)
+
+                    best_final = ""
+                    best_len = -1
+                    for cand0 in comp_candidates:
+                        cand = _clean_hm_composition(cand0)
+                        if not cand:
+                            continue
+                        cu = cand.upper()
+                        if re.search(r"\b\d{1,3}\s*%", cu) is None:
+                            continue
+                        if re.search(r"\b(POLYAMIDE|VISCOSE|CIRCULOSE|REVISCO|POLYESTER|COTTON|NYLON|ELASTANE|WOOL|LINEN|ACRYLIC|RAYON|SILK)\b", cu) is None:
+                            continue
+                        if len(cand) > best_len:
+                            best_final = cand
+                            best_len = len(cand)
+
+                    dbg_comp_pick["candidate_count"] = len(comp_candidates)
+                    dbg_comp_pick["best_final"] = best_final
+
+                    composition = _cell_str(best_final) if best_final else _cell_str(_clean_hm_composition(composition))
+
+                    try:
+                        cu = _cell_str(composition).upper()
+                        if re.search(r"\bWITH\s+C_?\b", cu) is not None:
+                            if re.search(r"C\s*IR?CULOSE|IRCULOSE", blob.upper()) is not None:
+                                composition = re.sub(r"\bWITH\s+C_?\b", "WITH CIRCULOSE", composition, flags=re.IGNORECASE)
+                    except Exception:
+                        pass
+
+                    if composition:
+                        composition = _maybe_join_composition_continuation(composition)
+                except Exception:
+                    dbg_comp_pick["error"] = "hm_comp_exception"
+                    pass
+
+            if dbg_comp:
+                try:
+                    blob2 = " ".join([_cell_str(x) for x in cells if _cell_str(x)])
+                    b2u = blob2.upper()
+                    if (
+                        ("%" in b2u)
+                        or (re.search(r"\b(POLYAMIDE|NYLON|ZCX\d+)\b", b2u) is not None)
+                        or (re.search(r"\b\d+\*\d+\b", b2u) is not None)
+                    ):
+                        print(
+                            "debug_bom_final_composition_pick",
+                            {
+                                "page": tbl.get("page"),
+                                "component": component,
+                                "composition": composition,
+                                "blob": blob2[:600],
+                                "pick": dbg_comp_pick,
+                            },
+                        )
+                except Exception:
+                    pass
+
+            # Normalize common HM OCR artifacts for polyester when the word is split across lines/cells.
+            # Examples:
+            # - '100% S0 POL' + 'YESTER' -> '100% S0 POLYESTER'
+            # - 'YESTER 100% S0 POL' -> '100% S0 POLYESTER'
+            cu_norm = _cell_str(composition).upper()
+            if "POLYESTER" not in cu_norm:
+                if re.search(r"\bS0\s+POL\b", cu_norm) is not None and re.search(r"\bYESTER\b", cu_norm) is not None:
+                    cu_norm = re.sub(r"\bYESTER\b", "", cu_norm)
+                    cu_norm = re.sub(r"\bS0\s+POL\b", "S0 POLYESTER", cu_norm)
+                    composition = " ".join(cu_norm.split()).strip()
+                elif re.search(r"\bS0\s+POL\b", cu_norm) is not None:
+                    # If YESTER was lost, still treat it as POLYESTER (matches the source table pattern).
+                    cu_norm = re.sub(r"\bS0\s+POL\b", "S0 POLYESTER", cu_norm)
+                    composition = " ".join(cu_norm.split()).strip()
 
             qty_num = _to_number(qty_raw)
 
@@ -974,6 +1155,171 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             # Only consider numeric-only cells as consumption when we can attach a valid unit.
             has_consumption_unit = bool(uom or consumption_uom)
             is_consumption_row = _looks_like_consumption_value(consumption_raw) or (consumption_qty is not None and has_consumption_unit)
+
+            # HM Supplementary: stitch extra description fragments for the consumption row.
+            # This is used for the main fabric line where description spans multiple physical rows/cells.
+            try:
+                if is_hm and is_consumption_row:
+                    d0 = _cell_str(desc)
+                    if d0:
+                        m_zcx = re.search(r"\bZCX\d+\b", d0.upper())
+                        if m_zcx is not None:
+                            d0 = d0[m_zcx.start() :].strip()
+                    add_desc: List[str] = []
+
+                    # Include composition text (percent-based) in description for main fabric.
+                    try:
+                        if composition and _looks_like_composition_text(composition):
+                            comp_fixed = _fix_split_fiber_words(composition)
+                            if comp_fixed and comp_fixed not in d0 and comp_fixed not in add_desc:
+                                add_desc.append(comp_fixed)
+                    except Exception:
+                        pass
+
+                    for cc in cells:
+                        ccs = _cell_str(cc)
+                        if not ccs:
+                            continue
+                        if _looks_like_supplier(ccs) or _looks_like_consumption_value(ccs):
+                            continue
+                        cu = ccs.upper()
+                        if re.search(r"\b\d{2,4}X\d{2,4}\b", cu) is not None or re.search(r"\b\d+DX\d+S\b", cu) is not None:
+                            add_desc.append(ccs)
+                            continue
+                        # Allow weight-like tokens into description for HM supplementary main fabric.
+                        if re.search(r"\b\d+(?:[\.,]\d+)?\s*G\s*/\s*(?:M2|M|SM)\b", cu.replace(" ", "")) is not None or re.search(r"\bGSM\b", cu) is not None:
+                            add_desc.append(ccs)
+                            continue
+                        if 'CW' in cu or '"' in ccs:
+                            add_desc.append(ccs)
+                            continue
+
+                    if ridx + 1 < len(rm):
+                        for j in range(ridx + 1, min(len(rm), ridx + 14)):
+                            rr = rm[j]
+                            if not isinstance(rr, list):
+                                continue
+                            row_cells = [_cell_str(x) for x in rr]
+                            if not any(row_cells):
+                                continue
+
+                            pos_idx = cols.get("position")
+                            row_pos = ""
+                            if pos_idx is not None and 0 <= pos_idx < len(row_cells):
+                                row_pos = _cell_str(row_cells[pos_idx])
+                            if row_pos:
+                                break
+
+                            key_hit = False
+                            for k in ["placement", "type", "material", "supplier", "consumption", "weight", "qty"]:
+                                ki = cols.get(k)
+                                if ki is None or ki < 0 or ki >= len(row_cells):
+                                    continue
+                                v = _cell_str(row_cells[ki])
+                                if not v:
+                                    continue
+                                # In HM supplementary, the inferred qty column can hold composition fragments
+                                # like 'RECYCLED P'. Treat that as a stitchable continuation (not a new key row).
+                                if k == "qty":
+                                    v_fixed = _fix_split_fiber_words(v)
+                                    vu = _cell_str(v_fixed).upper()
+                                    if _is_composition_fragment_only(v_fixed) or _looks_like_composition_text(v_fixed) or re.search(r"\bRECYCLED\b", vu) is not None:
+                                        continue
+                                key_hit = True
+                                break
+                            if key_hit:
+                                continue
+
+                            d_frag = ""
+                            di = cols.get("description")
+                            if di is not None and 0 <= di < len(row_cells):
+                                d_frag = _cell_str(row_cells[di])
+                            if d_frag and d_frag not in add_desc and d_frag not in d0:
+                                add_desc.append(d_frag)
+
+                            # Continuation rows sometimes carry RECYCLED POLYESTER in a non-composition column.
+                            # Scan all cells and pick the best recycled fiber fragment.
+                            best_recycled = ""
+                            for rc in row_cells:
+                                if not rc:
+                                    continue
+                                if _looks_like_supplier(rc) or _looks_like_consumption_value(rc):
+                                    continue
+                                rc_fixed = _fix_split_fiber_words(rc)
+                                if _is_composition_fragment_only(rc_fixed):
+                                    continue
+                                ru = _cell_str(rc_fixed).upper()
+                                if "RECYCLED" in ru and ("POLYESTER" in ru or re.search(r"\bRECYCLED\s+P\b", ru) is not None):
+                                    # Prefer the longer recycled fragment.
+                                    if len(rc_fixed) > len(best_recycled):
+                                        best_recycled = rc_fixed
+                            # If we only captured a short recycled fragment (e.g. 'RECYCLED P'),
+                            # try to complete it by peeking at the next physical row for continuation tokens.
+                            try:
+                                bu = _cell_str(best_recycled).upper()
+                                if re.search(r"\bRECYCLED\s+P\b", bu) is not None and (j + 1) < len(rm):
+                                    rr2 = rm[j + 1]
+                                    if isinstance(rr2, list):
+                                        row2 = [_cell_str(x) for x in rr2]
+                                        tok2 = ""
+                                        for c2 in row2:
+                                            c2u = _cell_str(c2).upper()
+                                            if c2u in {"OLYESTER", "YESTER", "ESTER", "OLYAMIDE", "AMIDE", "COSE"}:
+                                                tok2 = c2
+                                                break
+                                        if tok2:
+                                            best_recycled = _fix_split_fiber_words(f"{best_recycled} {tok2}")
+                                            skip_row_idx.add(j + 1)
+                            except Exception:
+                                pass
+                            if best_recycled:
+                                if best_recycled not in add_desc and best_recycled not in d0:
+                                    add_desc.append(best_recycled)
+
+                            if add_desc:
+                                skip_row_idx.add(j)
+
+                    if add_desc:
+                        d0 = " ".join([x for x in [d0] + add_desc if x]).strip()
+                        d0 = _cell_str(d0)
+                    if d0:
+                        desc = d0
+
+                    if dbg_comp:
+                        try:
+                            if re.search(r"\bZCX\d+\b", _cell_str(desc).upper()) is not None:
+                                print(
+                                    "debug_bom_final_consumption_row",
+                                    {
+                                        "page": tbl.get("page"),
+                                        "component": component,
+                                        "description": desc,
+                                        "composition": composition,
+                                        "consumption_raw": consumption_raw,
+                                        "uom": uom,
+                                        "weight": weight,
+                                    },
+                                )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # HM Supplementary: sometimes the extracted "Description" column is empty while
+            # the actual descriptor lives in the Material/Material Appearance column (e.g. Elastic/Tape/Buckle).
+            # Only apply this fallback for consumption rows to avoid filling non-consumption rows.
+            try:
+                if is_hm and is_consumption_row and (not _cell_str(desc)) and _cell_str(material):
+                    if (
+                        (not _looks_like_supplier(material))
+                        and (not _extract_weight_value(material))
+                        and (not _looks_like_consumption_value(material))
+                        and (not _looks_like_composition_text(material))
+                        and (not _is_composition_fragment_only(material))
+                    ):
+                        desc = material
+            except Exception:
+                pass
 
             # If supplier is present, it should go to Production Units.
             if is_supplier_row:
@@ -1107,6 +1453,130 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
 
     if not merged and not merged_prod:
         return None
+
+    try:
+        orphan_frags: List[str] = []
+
+        def _looks_like_hm_orphan_fragment(s: str) -> bool:
+            try:
+                su = _cell_str(s).upper()
+                if not su:
+                    return False
+                if _looks_like_supplier(su):
+                    return False
+                if _looks_like_consumption_value(su):
+                    return False
+                if _extract_weight_value(su):
+                    return False
+                if re.search(r"\b(RECYCLED|CIRCULOSE|REVISCO)\b", su) is not None:
+                    return True
+                if re.search(r"\b\d+DX\d+S\b", su) is not None:
+                    return True
+                if re.search(r"\b\d{2,4}X\d{2,4}\b", su) is not None:
+                    return True
+                if "CW" in su or "\"" in su:
+                    return True
+                if re.search(r"\b\d+(?:[\.,]\d+)?\s*G\s*/\s*(?:M2|M|SM)\b", su.replace(" ", "")) is not None:
+                    return True
+                if re.search(r"\bGSM\b", su) is not None:
+                    return True
+                if re.search(r"\bRECY\b", su) is not None or "RECY" in su:
+                    return True
+                return False
+            except Exception:
+                return False
+
+        for _page_i, _neg_score, tt in candidates:
+            try:
+                headers = tt.get("headers") or []
+                rm = tt.get("rows_matrix") or []
+                is_hm_tbl = isinstance(headers, list) and any(
+                    re.search(r"\bPOSITION\b", str(h or ""), flags=re.IGNORECASE) for h in headers
+                )
+                if not is_hm_tbl or not isinstance(rm, list) or not rm:
+                    continue
+                cols0 = _infer_bom_columns(headers)
+                if not isinstance(cols0, dict):
+                    continue
+
+                for rr in rm[1:]:
+                    if not isinstance(rr, list):
+                        continue
+                    row_cells = [_cell_str(x) for x in rr]
+                    if not any(row_cells):
+                        continue
+
+                    pos = ""
+                    for kpos in ["position", "placement", "type"]:
+                        ki = cols0.get(kpos)
+                        if ki is not None and 0 <= ki < len(row_cells):
+                            pos = pos + _cell_str(row_cells[ki])
+                    if _cell_str(pos):
+                        continue
+
+                    has_consumption = False
+                    ci = cols0.get("consumption")
+                    if ci is not None and 0 <= ci < len(row_cells):
+                        if _looks_like_consumption_value(_cell_str(row_cells[ci])):
+                            has_consumption = True
+                    if has_consumption:
+                        continue
+
+                    sup_blob = ""
+                    si = cols0.get("supplier")
+                    if si is not None and 0 <= si < len(row_cells):
+                        sup_blob = _cell_str(row_cells[si])
+                    if _looks_like_supplier(sup_blob):
+                        continue
+
+                    desc_i = cols0.get("description")
+                    comp_i = cols0.get("composition")
+                    seed: List[str] = []
+                    if desc_i is not None and 0 <= desc_i < len(row_cells):
+                        d = _cell_str(row_cells[desc_i])
+                        if d:
+                            seed.append(d)
+                    if comp_i is not None and 0 <= comp_i < len(row_cells):
+                        c = _cell_str(row_cells[comp_i])
+                        if c:
+                            seed.append(c)
+                    for cc in row_cells:
+                        if not cc:
+                            continue
+                        if _looks_like_hm_orphan_fragment(cc):
+                            seed.append(cc)
+
+                    for s in seed:
+                        sf = _fix_split_fiber_words(s)
+                        if not sf:
+                            continue
+                        if not _looks_like_hm_orphan_fragment(sf):
+                            continue
+                        if sf not in orphan_frags:
+                            orphan_frags.append(sf)
+            except Exception:
+                continue
+
+        if orphan_frags:
+            for ln in merged:
+                try:
+                    d0 = _cell_str(ln.get("description") or "")
+                    if re.search(r"\bZCX\d+\b", d0.upper()) is None:
+                        continue
+                    add2: List[str] = []
+                    for f in orphan_frags:
+                        if not f:
+                            continue
+                        fu = _cell_str(f).upper()
+                        if ("RECYCLED" in fu) or ("RECY" in fu) or ("CW" in fu) or (re.search(r"\b\d+DX\d+S\b", fu) is not None):
+                            if f not in d0 and f not in add2:
+                                add2.append(f)
+                    if add2:
+                        ln["description"] = _cell_str(" ".join([x for x in [d0] + add2 if x]).strip())
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
     out: Dict[str, Any] = {"lines": merged, "source": {"table_kind": best_kind, "score": best_score}}
     if merged_prod:
