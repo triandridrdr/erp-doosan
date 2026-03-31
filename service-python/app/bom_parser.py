@@ -404,6 +404,19 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                 re.search(r"\bPOSITION\b", str(h or ""), flags=re.IGNORECASE) for h in headers
             )
             if is_hm and isinstance(rm, list):
+                # If the table has an explicit 'Composition' header, do not override it with
+                # heuristic column scoring (OCR can leak '%' and fiber tokens into Description).
+                explicit_comp_idx: Optional[int] = None
+                try:
+                    for i_h, h in enumerate(headers):
+                        if re.search(r"\bCOMPOSITION\b", str(h or ""), flags=re.IGNORECASE) is not None:
+                            explicit_comp_idx = i_h
+                            break
+                    if explicit_comp_idx is not None:
+                        cols["composition"] = int(explicit_comp_idx)
+                except Exception:
+                    explicit_comp_idx = None
+
                 col_w = 0
                 for r in rm[start_idx : start_idx + 12]:
                     if isinstance(r, list):
@@ -467,7 +480,7 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                 i_cons = _best(cons_score)
                 i_w = _best(weight_score)
 
-                if i_comp is not None:
+                if i_comp is not None and explicit_comp_idx is None:
                     cols["composition"] = int(i_comp)
                 if i_cons is not None:
                     cols["consumption"] = int(i_cons)
@@ -878,6 +891,60 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                         composition = best_comp
                 except Exception:
                     pass
+
+            # HM Supplementary: composition can be split across Description/Composition columns and
+            # sometimes continues in the next physical rows. Stitch those fragments conservatively.
+            try:
+                if is_hm:
+                    # Merge percentage-leading fragment from description with the composition cell.
+                    desc_u = _cell_str(desc).upper()
+                    comp_u = _cell_str(composition).upper()
+                    if ("%" in desc_u) and (desc_u not in comp_u):
+                        # Avoid using description text that looks like a component name (e.g., SMOCKING THR).
+                        if _looks_like_composition_text(desc) and (not _looks_like_supplier(desc)):
+                            merged0 = _fix_split_fiber_words((desc + " " + (composition or "")).strip())
+                            if len(merged0) > len(_cell_str(composition)) + 3:
+                                composition = merged0
+
+                    # Append composition fragments from immediate continuation rows where Position is blank.
+                    if ridx + 1 < len(rm):
+                        for j in range(ridx + 1, min(len(rm), ridx + 6)):
+                            rr = rm[j]
+                            if not isinstance(rr, list):
+                                continue
+                            row_cells = [_cell_str(x) for x in rr]
+                            if not any(row_cells):
+                                continue
+                            # Stop when a new position starts.
+                            pos_idx = cols.get("position")
+                            row_pos = ""
+                            if pos_idx is not None and 0 <= pos_idx < len(row_cells):
+                                row_pos = _cell_str(row_cells[pos_idx])
+                            if row_pos:
+                                break
+
+                            add_frags: List[str] = []
+                            for cc in row_cells:
+                                if not cc:
+                                    continue
+                                if _extract_weight_value(cc):
+                                    continue
+                                if _looks_like_consumption_value(cc):
+                                    continue
+                                if _looks_like_supplier(cc):
+                                    continue
+                                if not _looks_like_composition_text(cc):
+                                    continue
+                                cc_fixed = _fix_split_fiber_words(cc)
+                                if _is_composition_fragment_only(cc_fixed):
+                                    continue
+                                add_frags.append(cc_fixed)
+
+                            if add_frags:
+                                composition = _fix_split_fiber_words((composition + " " + " ".join(add_frags)).strip())
+                                skip_row_idx.add(j)
+            except Exception:
+                pass
 
             # Final normalization for HM Supplementary: sometimes the fiber word is split across
             # cells or leaked into merged headers (e.g. 'RECYCLED P' + 'OLYESTER').
