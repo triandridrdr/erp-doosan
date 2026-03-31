@@ -998,7 +998,9 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                         c = re.sub(r"\b\d+DX\d+S\b", "", c, flags=re.IGNORECASE)
                         c = re.sub(r"\s*\+?\d+\s*/\s*\d+\b", "", c)
                         c = re.sub(r"\bX\b", " ", c, flags=re.IGNORECASE)
-                        c = re.sub(r"%\s+(?=[A-Z])", " ", c)
+                        # Remove stray '%' that OCR sometimes inserts before a fiber word,
+                        # but do NOT strip valid percent tokens like '80% VISCOSE'.
+                        c = re.sub(r"(?<!\d)%\s+(?=[A-Z])", " ", c)
                         c = re.sub(r"\s*,\s*", ", ", c)
                         c = _cell_str(c)
                         cu = c.upper()
@@ -1401,6 +1403,35 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
     sources: List[Dict[str, Any]] = []
     best_score = 0
     best_kind = None
+    best_comp_by_component: Dict[str, Tuple[int, str]] = {}
+
+    def _composition_quality_score(s: str) -> int:
+        try:
+            su = _cell_str(s).upper()
+            if not su:
+                return -10**6
+            sc = len(su)
+            if re.search(r"\b\d{1,3}\s*%", su) is not None:
+                sc += 60
+            if re.search(r"\b(POLYAMIDE|VISCOSE|CIRCULOSE|REVISCO|POLYESTER|COTTON|NYLON|ELASTANE|WOOL|LINEN|ACRYLIC|RAYON|SILK)\b", su) is not None:
+                sc += 40
+            if re.search(r"\b20\*\d+\b", su) is not None or re.search(r"\b\d+\*\d+\b", su) is not None:
+                sc -= 80
+            if "%NYLON" in su:
+                sc -= 80
+            if re.search(r"\bC\s+X\b", su) is not None:
+                sc -= 35
+            if re.search(r"\b\d{2,4}X\d{2,4}\b", su) is not None or re.search(r"\b\d+DX\d+S\b", su) is not None:
+                sc -= 50
+            if _extract_weight_value(su):
+                sc -= 40
+            if _looks_like_consumption_value(su):
+                sc -= 40
+            if _looks_like_supplier(su):
+                sc -= 80
+            return int(sc)
+        except Exception:
+            return -10**6
 
     for page_i, neg_score, t in candidates:
         lines_i, prod_i, score_i = _extract_lines_from_table(t)
@@ -1417,6 +1448,17 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             }
         )
         for line in lines_i:
+            try:
+                comp0 = _cell_str(line.get("composition") or "")
+                if comp0:
+                    ck0 = _norm_key(str(line.get("component") or ""))
+                    if ck0:
+                        sc0 = _composition_quality_score(comp0)
+                        cur0 = best_comp_by_component.get(ck0)
+                        if (cur0 is None) or (sc0 > int(cur0[0])):
+                            best_comp_by_component[ck0] = (int(sc0), comp0)
+            except Exception:
+                pass
             k = (
                 _norm_key(str(line.get("component") or ""))
                 + "|"
@@ -1427,11 +1469,32 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
             if not k.strip("|"):
                 continue
             q = _quality_score_line(line, ["description"]) + (8 if line.get("weight") else 0)
-            if (k not in merged_map) or (q > int(merged_q.get(k, -10**9))):
+            q_comp = _composition_quality_score(str(line.get("composition") or ""))
+            q_total = int(q) + int(q_comp // 20)
+            if k in merged_map:
+                try:
+                    cur = merged_map.get(k) or {}
+                    cur_comp = str(cur.get("composition") or "")
+                    if q_comp > _composition_quality_score(cur_comp):
+                        cur["composition"] = line.get("composition")
+                except Exception:
+                    pass
+            if (k not in merged_map) or (q_total > int(merged_q.get(k, -10**9))):
                 merged_map[k] = line
-                merged_q[k] = q
+                merged_q[k] = q_total
 
         for line in prod_i:
+            try:
+                comp0 = _cell_str(line.get("composition") or "")
+                if comp0:
+                    ck0 = _norm_key(str(line.get("component") or ""))
+                    if ck0:
+                        sc0 = _composition_quality_score(comp0)
+                        cur0 = best_comp_by_component.get(ck0)
+                        if (cur0 is None) or (sc0 > int(cur0[0])):
+                            best_comp_by_component[ck0] = (int(sc0), comp0)
+            except Exception:
+                pass
             kp = (
                 _norm_key(str(line.get("component") or ""))
                 + "|"
@@ -1450,6 +1513,42 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
 
     merged = list(merged_map.values())
     merged_prod = list(merged_prod_map.values())
+
+    # If we have a clean composition candidate for the same component from a non-consumption row
+    # (common in HM Supplementary where consumption and composition appear on different tables/pages),
+    # override the merged consumption row composition.
+    try:
+        dbg_comp = os.getenv("BOM_DEBUG_COMPOSITION", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+        for ln in merged:
+            ck = _norm_key(str(ln.get("component") or ""))
+            if not ck:
+                continue
+            best = best_comp_by_component.get(ck)
+            if not best:
+                continue
+            best_sc, best_comp = best
+            cur_comp = _cell_str(ln.get("composition") or "")
+            cur_sc = _composition_quality_score(cur_comp)
+            if best_sc > cur_sc:
+                ln["composition"] = best_comp
+                if dbg_comp:
+                    try:
+                        comp_name = _cell_str(ln.get("component") or "")
+                        if re.search(r"\bSHELL\b", comp_name.upper()) is not None:
+                            print(
+                                "debug_bom_merge_comp_override",
+                                {
+                                    "component": comp_name,
+                                    "from": cur_comp,
+                                    "to": best_comp,
+                                    "from_sc": int(cur_sc),
+                                    "to_sc": int(best_sc),
+                                },
+                            )
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
     if not merged and not merged_prod:
         return None
