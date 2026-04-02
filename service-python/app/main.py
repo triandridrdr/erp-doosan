@@ -7139,7 +7139,7 @@ def ocr_extract_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     combined_tables: List[Dict[str, Any]] = []
     for p in all_pages:
         for t in (p.get("tables") or []):
-            tt = {"page": p.get("page"), **t}
+            tt = {"page": p.get("page"), "page_text": p.get("text") or "", **t}
             try:
                 tt = _table_add_rows_matrix(tt)
             except Exception:
@@ -8418,7 +8418,7 @@ async def ocr_extract(
     combined_tables: List[Dict[str, Any]] = []
     for p in all_pages:
         for t in (p.get("tables") or []):
-            tt = {"page": p.get("page"), **t}
+            tt = {"page": p.get("page"), "page_text": p.get("text") or "", **t}
             try:
                 tt = _table_add_rows_matrix(tt)
             except Exception:

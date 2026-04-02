@@ -349,9 +349,21 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
         return None
 
     candidates: List[Tuple[int, int, Dict[str, Any]]] = []
+    page_text_by_page: Dict[int, str] = {}
     for t in tables:
         if not isinstance(t, dict):
             continue
+        try:
+            p0 = t.get("page")
+            pi0 = int(p0) if p0 is not None else None
+        except Exception:
+            pi0 = None
+        try:
+            pt0 = _cell_str(t.get("page_text") or "")
+            if pi0 is not None and pt0 and (pi0 not in page_text_by_page):
+                page_text_by_page[pi0] = pt0
+        except Exception:
+            pass
         headers0 = t.get("headers") or []
         rm0 = t.get("rows_matrix") or []
         if not isinstance(headers0, list) or not isinstance(rm0, list):
@@ -377,6 +389,176 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
         tbl: Dict[str, Any],
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
         dbg_comp = os.getenv("BOM_DEBUG_COMPOSITION", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+        def _hm_shell_description_from_page_text(*, page_text: str, code_tok: str) -> str:
+            try:
+                pt = _cell_str(page_text)
+                if not pt:
+                    return ""
+                lines0 = [ln.rstrip() for ln in pt.splitlines()]
+                lines = [ln for ln in lines0 if ln.strip()]
+                if not lines:
+                    return ""
+
+                code_u = _cell_str(code_tok).upper().strip()
+                start_idx: Optional[int] = None
+
+                # Prefer anchoring by the article code (JY/ZCX...).
+                if code_u:
+                    for i, ln in enumerate(lines):
+                        if code_u in ln.upper():
+                            start_idx = i
+                            break
+
+                # Fallback anchors.
+                if start_idx is None:
+                    for i, ln in enumerate(lines):
+                        if re.search(r"\bJY\d{3,}\b", ln.upper()) is not None:
+                            start_idx = i
+                            break
+                if start_idx is None:
+                    for i, ln in enumerate(lines):
+                        if re.search(r"\bJY\s*\d{3,}\b", ln.upper()) is not None:
+                            start_idx = i
+                            break
+                if start_idx is None:
+                    for i, ln in enumerate(lines):
+                        if re.search(r"\bSHELL\b", ln.upper()) is not None and re.search(r"\bPLAIN\b|\bCAMBRIC\b|\bVOILE\b", ln.upper()) is not None:
+                            start_idx = i
+                            break
+
+                if start_idx is None:
+                    return ""
+
+                stop_re = re.compile(
+                    r"\b(MATERIAL\s+SUPPLIER|SUPPLIER\s+ARTICLE|ARTICLE\s+SUPPLIER|BOOKING\s*ID|DEMAND\s*ID|TREATMENTS|CONSUMPTION|WEIGHT|CONSTRUCTION|PLACEMENT|POSITION|MATERIAL\s+APPEARANCE)\b",
+                    flags=re.IGNORECASE,
+                )
+                stop_noise_re = re.compile(
+                    r"\b(HANGZHOU|SHAOXING|EXPORT\b|IMPORT\b|PRINTING\b|DYEING\b|CO\.,?\s*LTD\b|QWO\d+|QW0\d+|QW\d+|Q0\d+)\b",
+                    flags=re.IGNORECASE,
+                )
+
+                out: List[str] = []
+                saw_sizes = False
+                for ln in lines[start_idx : start_idx + 26]:
+                    if stop_re.search(ln) is not None:
+                        break
+                    # Stop before supplier/article tail noise.
+                    if stop_noise_re.search(ln) is not None:
+                        # Allow capturing a final sizes/width line if it exists after the code block.
+                        if ("SIZES" in ln.upper()) or ('"' in ln) or ("GSM" in ln.upper()):
+                            out.append(ln.strip())
+                        break
+                    if ("SIZES" in ln.upper()) or ("SIZES" in ln.upper()) or ("=" in ln) or ('"' in ln):
+                        saw_sizes = True
+                    out.append(ln.strip())
+                    if saw_sizes and ("=" in ln or "SIZES" in ln.upper()):
+                        # Once we captured the sizes line, stop to avoid trailing unrelated text.
+                        continue
+
+                if not out:
+                    return ""
+
+                # Join into a single blob and hard-trim to the first article code occurrence.
+                blob = " ".join(out).strip()
+                try:
+                    m_code = re.search(r"\b(?:JY|ZCX)\s*\d{3,}[A-Z0-9\-]*\b", blob, flags=re.IGNORECASE)
+                    if m_code is not None:
+                        blob = blob[m_code.start() :].strip()
+                except Exception:
+                    pass
+
+                # Drop common tail noise (supplier/article codes).
+                try:
+                    blob = re.split(
+                        r"\b(HANGZHOU|SHAOXING|EXPORT\b|IMPORT\b|PRINTING\b|DYEING\b|CO\.,?\s*LTD\b|QWO\d+|QW0\d+|QW\d+|Q0\d+)\b",
+                        blob,
+                        flags=re.IGNORECASE,
+                    )[0].strip()
+                except Exception:
+                    pass
+
+                # If OCR returned a single line, mimic the PDF wrapped layout by hard-wrapping.
+                if "\n" not in blob:
+                    try:
+                        width = 14
+                        blob = "\n".join([blob[i : i + width] for i in range(0, len(blob), width)]).strip()
+                    except Exception:
+                        pass
+
+                if not blob:
+                    return ""
+
+                # Trim any prefix before the code on the first line.
+                if out:
+                    u0 = out[0].upper()
+                    if not code_u:
+                        try:
+                            m0 = re.search(r"\b(?:JY|ZCX)\s*\d{3,}[A-Z0-9\-]*\b", u0)
+                            if m0 is not None:
+                                code_u = u0[m0.start() : m0.end()].replace(" ", "").strip()
+                        except Exception:
+                            code_u = ""
+                    if code_u:
+                        pos0 = u0.replace(" ", "").find(code_u)
+                        if pos0 >= 0:
+                            # Compute pos in original string by searching progressively.
+                            try:
+                                m_pos = re.search(re.escape(code_u), u0.replace(" ", ""))
+                                if m_pos is not None:
+                                    # Best-effort: trim from first occurrence of 'JY'/'ZCX' in original.
+                                    m_jy = re.search(r"\b(?:JY|ZCX)\b", u0)
+                                    if m_jy is not None:
+                                        out[0] = out[0][m_jy.start() :].strip()
+                            except Exception:
+                                pass
+                # Preserve multiline wrapping as in the PDF block.
+                return blob
+            except Exception:
+                return ""
+
+        def _hm_shell_description_from_any_text(*, page_text: str, code_tok: str) -> str:
+            """Robust fallback: search within the full text blob and extract around the article code."""
+            try:
+                pt = _cell_str(page_text)
+                if not pt:
+                    return ""
+                code_u = _cell_str(code_tok).upper().strip()
+                u = pt.upper()
+
+                m_code = None
+                if code_u:
+                    pos = u.replace(" ", "").find(code_u)
+                    if pos >= 0:
+                        # best-effort: find actual match in original text
+                        m_code = re.search(r"\b(?:JY|ZCX)\s*\d{3,}[A-Z0-9\-]*\b", pt, flags=re.IGNORECASE)
+                if m_code is None:
+                    m_code = re.search(r"\b(?:JY|ZCX)\s*\d{3,}[A-Z0-9\-]*\b", pt, flags=re.IGNORECASE)
+                if m_code is None:
+                    return ""
+
+                # Take a window after the code and apply the same trimming rules.
+                win = pt[m_code.start() : m_code.start() + 420]
+                try:
+                    win = re.split(
+                        r"\b(HANGZHOU|SHAOXING|EXPORT\b|IMPORT\b|PRINTING\b|DYEING\b|CO\.,?\s*LTD\b|QWO\d+|QW0\d+|QW\d+|Q0\d+)\b",
+                        win,
+                        flags=re.IGNORECASE,
+                    )[0].strip()
+                except Exception:
+                    pass
+                if not win:
+                    return ""
+                # Wrap to mimic PDF
+                try:
+                    width = 14
+                    win = "\n".join([win[i : i + width] for i in range(0, len(win), width)]).strip()
+                except Exception:
+                    pass
+                return win
+            except Exception:
+                return ""
 
         headers = [str(h or "") for h in (tbl.get("headers") or [])]
         rm = tbl.get("rows_matrix") or []
@@ -1181,6 +1363,33 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                             d0 = d0[m_zcx.start() :].strip()
                     add_desc: List[str] = []
 
+                    # Capture material/article codes like JY8064-circul / ZCX56027 from anywhere in the row.
+                    # These are key identifiers for HM main fabric description.
+                    code_tok = ""
+                    is_shell_component = False
+                    try:
+                        comp_u = _cell_str(component).upper().strip()
+                        # Only treat the actual main fabric line as shell. Trim components often contain the
+                        # word 'Shell' in their component name (e.g. 'Trim Shell Tape'), but should not
+                        # receive shell description enrichment.
+                        is_shell_component = comp_u.startswith("SHELL")
+                    except Exception:
+                        is_shell_component = False
+                    try:
+                        for cc in cells:
+                            ccs = _cell_str(cc)
+                            if not ccs:
+                                continue
+                            cu = ccs.upper()
+                            if _looks_like_supplier(cu) or _looks_like_consumption_value(cu) or _extract_weight_value(cu):
+                                continue
+                            m_code = re.search(r"\b(?:JY|ZCX)[A-Z0-9][A-Z0-9\-]*\b", cu)
+                            if m_code is not None:
+                                code_tok = ccs[m_code.start() : m_code.end()]
+                                break
+                    except Exception:
+                        code_tok = ""
+
                     for cc in cells:
                         ccs = _cell_str(cc)
                         if not ccs:
@@ -1188,6 +1397,10 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                         if _looks_like_supplier(ccs) or _looks_like_consumption_value(ccs):
                             continue
                         cu = ccs.upper()
+                        # For main shell line, the PDF often embeds the composition block in the description area.
+                        # For non-shell components, keep composition out of description.
+                        if (not is_shell_component) and _looks_like_composition_text(ccs):
+                            continue
                         if re.search(r"\b\d{2,4}X\d{2,4}\b", cu) is not None or re.search(r"\b\d+DX\d+S\b", cu) is not None:
                             add_desc.append(ccs)
                             continue
@@ -1196,6 +1409,23 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                             add_desc.append(ccs)
                             continue
                         if 'CW' in cu or '"' in ccs:
+                            add_desc.append(ccs)
+                            continue
+                        # Width/size fragments: '+32/163*85', '163*85', 'SIZE', etc.
+                        if ("+" in ccs and ("*" in ccs or "/" in ccs)) or ("SIZE" in cu):
+                            add_desc.append(ccs)
+                            continue
+                        if ("SIZES" in cu) or ("=" in ccs):
+                            add_desc.append(ccs)
+                            continue
+
+                        # For the main shell line, allow capturing general descriptive/composition text
+                        # that appears in the description block in the PDF.
+                        if is_shell_component:
+                            if re.search(r"[A-Z]", cu) is None and re.search(r"[0-9]", cu) is None:
+                                continue
+                            if len(ccs) < 3:
+                                continue
                             add_desc.append(ccs)
                             continue
 
@@ -1242,6 +1472,39 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                             if d_frag and (not _looks_like_composition_text(d_frag)) and d_frag not in add_desc and d_frag not in d0:
                                 add_desc.append(d_frag)
 
+                            # For shell, pick up additional wrapped fragments from any column.
+                            if is_shell_component:
+                                try:
+                                    for frag in row_cells:
+                                        fs = _cell_str(frag)
+                                        if not fs:
+                                            continue
+                                        if _looks_like_supplier(fs) or _looks_like_consumption_value(fs):
+                                            continue
+                                        if _extract_weight_value(fs):
+                                            continue
+                                        if len(fs) < 3:
+                                            continue
+                                        fu = fs.upper()
+                                        if ("SIZES" in fu) or ("=" in fs) or ("GSM" in fu) or ('"' in fs) or ("%" in fu) or re.search(r"\b(VISCOSE|CIRCULOSE|NYLON|POLYAMIDE|REVISCO)\b", fu) is not None:
+                                            if fs not in add_desc and fs not in d0:
+                                                add_desc.append(fs)
+                                except Exception:
+                                    pass
+                            else:
+                                # Trim: join split words like 'smocking thr' + 'ead'
+                                try:
+                                    if re.search(r"\bTHR\b", _cell_str(d0).upper()) is not None:
+                                        for frag in row_cells:
+                                            fs = _cell_str(frag)
+                                            if not fs:
+                                                continue
+                                            if re.fullmatch(r"EAD", fs.strip(), flags=re.IGNORECASE):
+                                                if fs not in add_desc and fs not in d0:
+                                                    add_desc.append(fs)
+                                except Exception:
+                                    pass
+
                             # Continuation rows sometimes carry RECYCLED POLYESTER in a non-composition column.
                             # Scan all cells and pick the best recycled fiber fragment.
                             best_recycled = ""
@@ -1287,6 +1550,69 @@ def build_bom_payload(*, tables: Any) -> Optional[Dict[str, Any]]:
                     if add_desc:
                         d0 = " ".join([x for x in [d0] + add_desc if x]).strip()
                         d0 = _cell_str(d0)
+                    if is_shell_component and code_tok and (code_tok not in _cell_str(d0)):
+                        d0 = _cell_str((code_tok + " " + (d0 or "")).strip())
+
+                    # Option A: Override Shell description from non-table OCR text on the same page.
+                    if is_shell_component:
+                        try:
+                            page_text = _cell_str(tbl.get("page_text") or "")
+                            if not page_text:
+                                try:
+                                    p_i = int(tbl.get("page")) if tbl.get("page") is not None else None
+                                except Exception:
+                                    p_i = None
+                                if p_i is not None:
+                                    page_text = _cell_str(page_text_by_page.get(p_i) or "")
+                            d_from_text = _hm_shell_description_from_page_text(page_text=page_text, code_tok=code_tok)
+                            if (not d_from_text) and page_text:
+                                d_from_text = _hm_shell_description_from_any_text(page_text=page_text, code_tok=code_tok)
+                            if d_from_text:
+                                d0 = d_from_text
+                                if dbg_comp:
+                                    try:
+                                        if re.search(r"\bSHELL\s+SHELL\b", _cell_str(component).upper()) is not None:
+                                            print(
+                                                "debug_bom_shell_desc_from_page_text",
+                                                {
+                                                    "page": tbl.get("page"),
+                                                    "code_tok": code_tok,
+                                                    "page_text_len": len(_cell_str(page_text)),
+                                                    "desc": d_from_text[:220],
+                                                },
+                                            )
+                                    except Exception:
+                                        pass
+                            elif dbg_comp:
+                                try:
+                                    if re.search(r"\bSHELL\s+SHELL\b", _cell_str(component).upper()) is not None:
+                                        print(
+                                            "debug_bom_shell_desc_from_page_text_miss",
+                                            {
+                                                "page": tbl.get("page"),
+                                                "code_tok": code_tok,
+                                                "page_text_len": len(_cell_str(page_text)),
+                                                "page_text_head": _cell_str(page_text)[:200],
+                                            },
+                                        )
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                    # For non-shell components, ensure description doesn't include composition.
+                    if (not is_shell_component) and d0:
+                        du = d0.upper()
+                        # Remove leading article codes (e.g. JYFS10-1) for trim descriptions.
+                        d0 = re.sub(r"^\s*(?:JY|ZCX)[A-Z0-9][A-Z0-9\-]*\s+", "", d0, flags=re.IGNORECASE)
+                        if "%" in du:
+                            m_pct = re.search(r"\b\d{1,3}\s*%", du)
+                            if m_pct is not None:
+                                d0 = _cell_str(d0[: m_pct.start()]).strip()
+                        d0 = re.sub(r"\bTHR\s*EAD\b", "THREAD", d0, flags=re.IGNORECASE)
+                        # Preserve HM wrapped appearance for this word.
+                        d0 = re.sub(r"\bSMOCKING\s+THR\s*EAD\b", "SMOCKING THR\nEAD", d0, flags=re.IGNORECASE)
+                        d0 = re.sub(r"\bSMOCKING\s+THR\b", "SMOCKING THR\nEAD", d0, flags=re.IGNORECASE)
                     if d0:
                         desc = d0
 
